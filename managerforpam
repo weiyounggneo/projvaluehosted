@@ -775,11 +775,7 @@
               <label for="projectStatus">Project Status</label>
               <select id="projectStatus" v-model="activeForm.projectStatus" :disabled="isProcessing">
                 <option value="">(Blank)</option>
-                <option value="Ongoing">Ongoing</option>
-                <option value="Closed">Closed</option>
-                <option value="G1">G1</option>
-                <option value="G2">G2</option>
-                <option value="G3">G3</option>
+                <option v-for="status in configOptions.STATUS" :key="status" :value="status">{{ status }}</option>
               </select>
             </div>
 
@@ -787,9 +783,7 @@
               <label for="pillars">Pillars</label>
               <select id="pillars" v-model="activeForm.pillars" :disabled="isProcessing">
                 <option value="">(Blank)</option>
-                <option value="Process & Equipment Intelligence">Process & Equipment Intelligence</option>
-                <option value="Smart Decision Hub">Smart Decision Hub</option>
-                <option value="Vision Intelligence">Vision Intelligence</option>
+                <option v-for="pillar in configOptions.PILLAR" :key="pillar" :value="pillar">{{ pillar }}</option>
               </select>
             </div>
 
@@ -797,13 +791,9 @@
               <label>Sites (Select Multiple)</label>
               <div class="checkbox-group">
                 <label><input type="checkbox" value="ALL" v-model="activeForm.sitesArray" :disabled="isProcessing"> ALL</label>
-                <label><input type="checkbox" value="BSK" v-model="activeForm.sitesArray" :disabled="isProcessing"> BSK</label>
-                <label><input type="checkbox" value="CAL" v-model="activeForm.sitesArray" :disabled="isProcessing"> CAL</label>
-                <label><input type="checkbox" value="CLB" v-model="activeForm.sitesArray" :disabled="isProcessing"> CLB</label>
-                <label><input type="checkbox" value="KIR" v-model="activeForm.sitesArray" :disabled="isProcessing"> KIR</label>
-                <label><input type="checkbox" value="MAL" v-model="activeForm.sitesArray" :disabled="isProcessing"> MAL</label>
-                <label><input type="checkbox" value="MUA" v-model="activeForm.sitesArray" :disabled="isProcessing"> MUA</label>
-                <label><input type="checkbox" value="STS" v-model="activeForm.sitesArray" :disabled="isProcessing"> STS</label>
+                <label v-for="site in configOptions.SITE" :key="site">
+                  <input type="checkbox" :value="site" v-model="activeForm.sitesArray" :disabled="isProcessing"> {{ site }}
+                </label>
               </div>
             </div>
 
@@ -816,8 +806,7 @@
               <label for="dtitInvolved">DTIT Involved</label>
               <select id="dtitInvolved" v-model="activeForm.dtitInvolved" :disabled="isProcessing">
                 <option value="">(Blank)</option>
-                <option value="Yes">Yes</option>
-                <option value="No">No</option>
+                <option v-for="opt in configOptions.DTIT" :key="opt" :value="opt">{{ opt }}</option>
               </select>
             </div>
 
@@ -825,9 +814,7 @@
               <label for="aiAaAType">AI/AA/A type</label>
               <select id="aiAaAType" v-model="activeForm.aiAaAType" :disabled="isProcessing">
                 <option value="">(Blank)</option>
-                <option value="AI">AI</option>
-                <option value="AA">AA</option>
-                <option value="A">A</option>
+                <option v-for="opt in configOptions.AITYPE" :key="opt" :value="opt">{{ opt }}</option>
               </select>
             </div>
 
@@ -835,8 +822,7 @@
               <label for="foakNoak">FOAK/NOAK</label>
               <select id="foakNoak" v-model="activeForm.foakNoak" :disabled="isProcessing">
                 <option value="">(Blank)</option>
-                <option value="FOAK">FOAK</option>
-                <option value="NOAK">NOAK</option>
+                <option v-for="opt in configOptions.FOAKNOAK" :key="opt" :value="opt">{{ opt }}</option>
               </select>
             </div>
           </div>
@@ -1164,6 +1150,16 @@ export default {
     const currentYear = new Date().getFullYear();
 
     return {
+      // NEW: Dynamic Configuration Options from Backend
+      configOptions: {
+        SITE: [],
+        PILLAR: [],
+        STATUS: [],
+        DTIT: ['Yes', 'No'],
+        AITYPE: ['AI', 'AA', 'A'],
+        FOAKNOAK: ['FOAK', 'NOAK']
+      },
+
       // Timeline Window: Default to N-1 to N+3
       currentYear,
       defaultTimelineStart: currentYear - 1,
@@ -1241,7 +1237,7 @@ export default {
     isAdmin() {
       return localStorage.getItem('access_right') === 'admin';
     },
-    // NEW: Check if the user is allowed to edit data
+    // Check if the user is allowed to edit data
     isEditor() {
       const role = localStorage.getItem('access_right');
       return role === 'admin' || role === 'user';
@@ -1684,9 +1680,41 @@ export default {
       return this.$router.push('/login');
     }
 
-    await this.fetchTable();
+    // NEW: Fetch dynamic options along with table data
+    await Promise.all([
+      this.fetchTable(),
+      this.fetchConfigOptions()
+    ]);
   },
   methods: {
+    // -------------------------------------------------
+    // NEW: FETCH MASTER DATA OPTIONS
+    // -------------------------------------------------
+    async fetchConfigOptions() {
+      try {
+        const response = await this.apiFetch(`${process.env.VUE_APP_API_URL}/api/config/options`);
+        if (response.ok) {
+          const data = await response.json();
+          // Assign data from DB, but map fallbacks just in case the DB is empty
+          this.configOptions.SITE = data.SITE || ['BSK', 'CAL', 'CLB', 'KIR', 'MAL', 'MUA', 'STS'];
+          this.configOptions.PILLAR = data.PILLAR || ['Process & Equipment Intelligence', 'Smart Decision Hub', 'Vision Intelligence'];
+          this.configOptions.STATUS = data.STATUS || ['Ongoing', 'Closed', 'G1', 'G2', 'G3'];
+          this.configOptions.DTIT = data.DTIT || ['Yes', 'No'];
+          this.configOptions.AITYPE = data.AITYPE || ['AI', 'AA', 'A'];
+          this.configOptions.FOAKNOAK = data.FOAKNOAK || ['FOAK', 'NOAK'];
+        }
+      } catch (err) {
+        console.error("Failed to load config options. Using safe default fallbacks.", err);
+        // Defaults to keep the app running if network fails
+        this.configOptions.SITE = ['BSK', 'CAL', 'CLB', 'KIR', 'MAL', 'MUA', 'STS'];
+        this.configOptions.PILLAR = ['Process & Equipment Intelligence', 'Smart Decision Hub', 'Vision Intelligence'];
+        this.configOptions.STATUS = ['Ongoing', 'Closed', 'G1', 'G2', 'G3'];
+        this.configOptions.DTIT = ['Yes', 'No'];
+        this.configOptions.AITYPE = ['AI', 'AA', 'A'];
+        this.configOptions.FOAKNOAK = ['FOAK', 'NOAK'];
+      }
+    },
+
     // -------------------------------------------------
     // PDF EXPORT
     // -------------------------------------------------
@@ -2332,7 +2360,7 @@ export default {
     // INLINE EDITING
     // -------------------------------------------------
     startInlineEdit(row, field, currentValue) {
-      // NEW: Instantly block viewers from triggering the edit mode
+      // Instantly block viewers from triggering the edit mode
       if (!this.isEditor) return; 
 
       this.editingCell = { rowId: row.projectId, field };
