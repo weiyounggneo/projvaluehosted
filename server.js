@@ -6,9 +6,6 @@ const ldap = require('ldapjs');
 const mysql = require('mysql2');
 const path = require('path');
 const jwt = require('jsonwebtoken');
-const multer = require('multer');
-const XLSX = require('xlsx');
-const fs = require('fs');
 
 const {
   getTraceId,
@@ -22,33 +19,32 @@ const PORT = process.env.PORT || 5001;
 const LDAP_URL = process.env.LDAP_URL;
 const BASE_DN = process.env.LDAP_BASE_DN;
 
-const PROJECT_MASTER_TABLE = process.env.PROJECT_MASTER_TABLE || 't_project_master';
-const PROJECT_VALUES_TABLE = process.env.PROJECT_VALUES_TABLE || 't_project_values';
-const ACCESS_TABLE = process.env.ACCESS_TABLE || 't_project_access';
-
-const HISTORY_TABLE = 't_project_values_history'; 
-const MASTER_HISTORY_TABLE = 't_project_master_history'; 
-
-// Manager Yearly Tracking Tables (bem_projs database)
+// =====================================
+// DATABASE TABLES (bem_projs)
+// =====================================
 const MANAGER_PROJECTS_TABLE = 't_manager_project_master';
 const MANAGER_YEARLY_TABLE = 't_manager_yearly_savings';
 const MANAGER_METRICS_TABLE = 't_manager_metrics';
 const MANAGER_COMMENTS_TABLE = 't_manager_comments';
 const MANAGER_HISTORY_TABLE = 't_manager_history';
 const MANAGER_SITE_TARGETS_TABLE = 't_manager_site_targets'; 
-const MANAGER_PHASES_TABLE = 't_manager_project_phases'; // NEW: Ledger Table
+const MANAGER_PHASES_TABLE = 't_manager_project_phases'; 
+
+// RBAC & Master Data Tables
+const ACCESS_TABLE = 't_bem_access'; 
+const CONFIG_TABLE = 't_app_config'; 
 
 const app = express();
 
 app.use(cors({
-  origin: ['http://localhost:8080', 'http://localhost:8081'],
+  origin: ['http://localhost:8080', 'http://localhost:8081',"http://muasxv4005.mua.st.com:9090"],
   credentials: true
 }));
 
 app.use(express.json());
 
 // =====================================
-// Trace middleware
+// TRACE MIDDLEWARE
 // =====================================
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api')) {
@@ -73,9 +69,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// =====================================
 // Serve frontend build
-// =====================================
 app.use(express.static(path.join(__dirname, '../dist')));
 
 app.get(/^\/(?!api).*/, (req, res) => {
@@ -83,23 +77,9 @@ app.get(/^\/(?!api).*/, (req, res) => {
 });
 
 // =====================================
-// DB connections
+// DB CONNECTION (Pure MariaDB)
 // =====================================
-
-// Original DB Connection (For Weekly Dashboard)
 const db = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
-
-// NEW DB Connection (For Manager Yearly Dashboard -> bem_projs)
-const bemDb = mysql.createPool({
   host: process.env.DB_HOST, 
   user: process.env.BEM_DB_USER,
   password: process.env.BEM_DB_PASSWORD,
@@ -111,9 +91,8 @@ const bemDb = mysql.createPool({
 });
 
 // =====================================
-// Helpers
+// UTILITIES
 // =====================================
-
 function queryPromise(sql, params = [], req = null) {
   const trace = traceStart('queryPromise', req, {
     sqlPreview: typeof sql === 'string'
@@ -143,40 +122,6 @@ function queryPromise(sql, params = [], req = null) {
   });
 }
 
-function bemQueryPromise(sql, params = [], req = null) {
-  const trace = traceStart('bemQueryPromise', req, {
-    sqlPreview: typeof sql === 'string'
-      ? sql.replace(/\s+/g, ' ').trim().slice(0, 200)
-      : null,
-    paramCount: Array.isArray(params) ? params.length : 0
-  });
-
-  return new Promise((resolve, reject) => {
-    bemDb.query(sql, params, (err, results) => {
-      if (err) {
-        traceError(trace, err, {
-          sqlPreview: typeof sql === 'string'
-            ? sql.replace(/\s+/g, ' ').trim().slice(0, 200)
-            : null
-        });
-        return reject(err);
-      }
-
-      traceEnd(trace, {
-        rowCount: Array.isArray(results) ? results.length : undefined,
-        affectedRows: results?.affectedRows
-      });
-
-      resolve(results);
-    });
-  });
-}
-
-function safeUnlink(filePath) {
-  if (!filePath) return;
-  fs.unlink(filePath, () => {});
-}
-
 function normalizeText(value) {
   if (value === undefined || value === null) return null;
   const trimmed = String(value).trim();
@@ -184,51 +129,18 @@ function normalizeText(value) {
 }
 
 function normalizeNumber(value) {
-  if (value === undefined || value === null || String(value).trim() === '') {
-    return null;
-  }
-
+  if (value === undefined || value === null || String(value).trim() === '') return null;
   const parsed = Number(value);
   return Number.isNaN(parsed) ? null : parsed;
 }
 
-function getCurrentUser(req) {
-  return req?.user?.username || 'system';
-}
-
 function parseStandardDate(value) {
   if (!value) return null;
-
-  if (typeof value === 'number') {
-    const excelEpochUTC = Date.UTC(1899, 11, 30);
-    const dateUTC = new Date(excelEpochUTC + value * 86400000);
-    return dateUTC.toISOString().split('T')[0];
-  }
-
   let str = String(value).trim();
   str = str.substring(0, 10); 
 
-  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
-    return str;
-  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
   
-  const matchDDMM = str.match(/^(\d{1,2})[\s\-\/](\d{1,2})[\s\-\/](\d{2}|\d{4})$/);
-  if (matchDDMM) {
-    const day = matchDDMM[1].padStart(2, '0');
-    const month = matchDDMM[2].padStart(2, '0');
-    let year = matchDDMM[3];
-    if (year.length === 2) year = '20' + year;
-    return `${year}-${month}-${day}`; 
-  }
-
-  const matchYYYY = str.match(/^(\d{4})[\s\-\/](\d{1,2})[\s\-\/](\d{1,2})$/);
-  if (matchYYYY) {
-    const year = matchYYYY[1];
-    const month = matchYYYY[2].padStart(2, '0');
-    const day = matchYYYY[3].padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  }
-
   const fallbackDate = new Date(str);
   if (!isNaN(fallbackDate.getTime())) {
     const year = fallbackDate.getFullYear();
@@ -236,132 +148,48 @@ function parseStandardDate(value) {
     const day = String(fallbackDate.getDate()).padStart(2, '0');
     return `${year}-${month}-${day}`;
   }
-
   return str; 
 }
 
-async function getTableColumns(tableName, req = null) {
-  const rows = await queryPromise(
-    `
-      SELECT COLUMN_NAME
-      FROM information_schema.COLUMNS
-      WHERE TABLE_SCHEMA = ?
-        AND TABLE_NAME = ?
-      ORDER BY ORDINAL_POSITION
-    `,
-    [process.env.DB_NAME, tableName],
-    req
-  );
-
-  return rows.map(r => r.COLUMN_NAME);
-}
-
-async function findProjectByCode(projectCode, req = null) {
-  if (!projectCode) return null;
-
-  const rows = await queryPromise(
-    `
-      SELECT
-        project_code,
-        project_name,
-        project_description,
-        project_type,
-        use_case_investment,
-        project_status
-      FROM ${PROJECT_MASTER_TABLE}
-      WHERE project_code = ?
-      LIMIT 1
-    `,
-    [projectCode],
-    req
-  );
-
-  return rows[0] || null;
-}
-
-async function findProjectByName(projectName, req = null) {
-  if (!projectName) return null;
-
-  const rows = await queryPromise(
-    `
-      SELECT
-        project_code,
-        project_name,
-        project_description,
-        project_type,
-        use_case_investment,
-        project_status
-      FROM ${PROJECT_MASTER_TABLE}
-      WHERE project_name = ?
-      LIMIT 1
-    `,
-    [projectName],
-    req
-  );
-
-  return rows[0] || null;
-}
-
-async function resolveProject(req, body) {
-  const projectCode = normalizeText(body.project_code);
-  const projectName = normalizeText(body.project_name);
-
-  if (projectCode) {
-    return await findProjectByCode(projectCode, req);
-  }
-
-  if (projectName) {
-    return await findProjectByName(projectName, req);
-  }
-
-  return null;
-}
-
-function validateProjectMasterPayload(payload) {
-  if (!payload.project_code) return 'project_code is required.';
-  if (!payload.project_name) return 'project_name is required.';
-  if (!payload.project_type) return 'project_type is required.';
-  return '';
-}
-
-function validateProjectValuePayload(payload) {
-  if (!payload.project_code && !payload.project_name) {
-    return 'project_code or project_name is required.';
-  }
-
-  if (
-    payload.capacity_improvement === null &&
-    payload.people_productivity === null &&
-    payload.quality_improvement === null &&
-    payload.yield_savings === null
-  ) {
-    return 'At least one KPI metric (Capacity, People, Quality, or Yield) must be provided.';
-  }
-
-  return '';
+function getCurrentUser(req) {
+  return req?.user?.username || 'system';
 }
 
 // =====================================
-// Auth
+// AUTH & SECURITY MIDDLEWARE
 // =====================================
 function authenticateToken(req, res, next) {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(' ')[1];
 
-  if (!token) {
-    return res.status(401).json({ message: 'No token provided.' });
-  }
+  if (!token) return res.status(401).json({ message: 'No token provided.' });
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ message: 'Session expired. Please log in again.' });
-    }
-
+    if (err) return res.status(403).json({ message: 'Session expired. Please log in again.' });
     req.user = user;
     next();
   });
 }
 
+// Blocks 'pending' users from fetching data
+function requireAccess(req, res, next) {
+  const role = req.user?.access_right;
+  if (!['viewer', 'user', 'admin'].includes(role)) {
+    return res.status(403).json({ message: 'Forbidden: Your account is pending approval.' });
+  }
+  next();
+}
+
+// Blocks 'viewer' and 'pending' users from editing data
+function requireEditAccess(req, res, next) {
+  const role = req.user?.access_right;
+  if (!['user', 'admin'].includes(role)) {
+    return res.status(403).json({ message: 'Forbidden: You do not have edit privileges.' });
+  }
+  next();
+}
+
+// Strictly for Admin operations
 function requireAdmin(req, res, next) {
   if (req.user?.access_right !== 'admin') {
     return res.status(403).json({ message: 'Forbidden: Admins only.' });
@@ -369,133 +197,85 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// =====================================
+// LOGIN ROUTE
+// =====================================
 app.post('/api/login', (req, res) => {
-  const trace = traceStart('POST /api/login', req, {
-    username: req.body?.username || null
-  });
-
+  const trace = traceStart('POST /api/login', req, { username: req.body?.username || null });
   const { username, password } = req.body;
 
   if (!username || !password) {
     traceEnd(trace, { outcome: 'missing_credentials' });
-    return res.status(400).json({
-      success: false,
-      message: 'Username and password are required.'
-    });
+    return res.status(400).json({ success: false, message: 'Username and password are required.' });
   }
 
   const client = ldap.createClient({ url: LDAP_URL });
-
-  const opts = {
-    filter: `(uid=${username})`,
-    scope: 'one',
-    attributes: ['dn']
-  };
+  const opts = { filter: `(uid=${username})`, scope: 'one', attributes: ['dn'] };
 
   client.search(BASE_DN, opts, (err, search) => {
     if (err) {
       traceError(trace, err, { step: 'ldap_search' });
       client.unbind();
-      return res.status(500).json({
-        success: false,
-        message: 'LDAP search failed.'
-      });
+      return res.status(500).json({ success: false, message: 'LDAP search failed.' });
     }
 
     let userDN = null;
     let responded = false;
 
-    search.on('searchEntry', entry => {
-      userDN = entry.dn.toString();
-    });
-
+    search.on('searchEntry', entry => { userDN = entry.dn.toString(); });
+    
     search.on('error', streamErr => {
       if (!responded) {
         responded = true;
         traceError(trace, streamErr, { step: 'ldap_search_stream' });
         client.unbind();
-        return res.status(500).json({
-          success: false,
-          message: 'LDAP search error.'
-        });
+        return res.status(500).json({ success: false, message: 'LDAP search error.' });
       }
     });
 
     search.on('end', () => {
       client.unbind();
-
       if (responded) return;
 
       if (!userDN) {
         responded = true;
-        traceEnd(trace, {
-          outcome: 'user_not_found',
-          username
-        });
-        return res.status(401).json({
-          success: false,
-          message: 'User not found.'
-        });
+        traceEnd(trace, { outcome: 'user_not_found', username });
+        return res.status(401).json({ success: false, message: 'User not found.' });
       }
 
       const userClient = ldap.createClient({ url: LDAP_URL });
-
       userClient.bind(userDN, password, async bindErr => {
         userClient.unbind();
-
         if (responded) return;
 
         if (bindErr) {
           responded = true;
-          traceEnd(trace, {
-            outcome: 'invalid_credentials',
-            username
-          });
-          return res.status(401).json({
-            success: false,
-            message: 'Invalid username or password.'
-          });
+          traceEnd(trace, { outcome: 'invalid_credentials', username });
+          return res.status(401).json({ success: false, message: 'Invalid username or password.' });
         }
 
-        let access_right = '';
-
+        // --- NEW: Default to pending ---
+        let access_right = 'pending';
         try {
-          const results = await queryPromise(
-            `SELECT access_right FROM ${ACCESS_TABLE} WHERE username = ?`,
-            [username],
-            req
-          );
-
+          const results = await queryPromise(`SELECT access_right FROM ${ACCESS_TABLE} WHERE username = ?`, [username], req);
+          console.log("LOGIN DB CHECK FOR:", username, "RESULTS:", results);
+          
           if (results.length > 0) {
-            access_right = results[0].access_right || '';
+            access_right = results[0].access_right || 'pending';
+          } else {
+            // Auto-insert them so the Admin can see them in the config page
+            await queryPromise(`INSERT INTO ${ACCESS_TABLE} (username, access_right, granted_by) VALUES (?, 'pending', 'system')`, [username], req);
           }
         } catch (dbErr) {
-          traceError(trace, dbErr, {
-            step: 'load_access_right',
-            username
-          });
+          console.error("🔥🔥🔥 DATABASE ERROR IN LOGIN:", dbErr);
+          traceError(trace, dbErr, { step: 'load_access_right', username });
         }
 
-        const token = jwt.sign(
-          { username, access_right },
-          JWT_SECRET,
-          { expiresIn: '4h' }
-        );
-
+        const token = jwt.sign({ username, access_right }, JWT_SECRET, { expiresIn: '4h' });
         responded = true;
+        traceEnd(trace, { outcome: 'login_success', username, access_right });
 
-        traceEnd(trace, {
-          outcome: 'login_success',
-          username,
-          access_right
-        });
-
-        return res.json({
-          success: true,
-          message: 'LDAP authentication successful.',
-          token,
-          access_right
-        });
+        return res.json({ success: true, message: 'LDAP authentication successful.', token, access_right });
       });
     });
   });
@@ -505,1130 +285,100 @@ app.get('/api/check-auth', authenticateToken, (req, res) => {
   res.json({ loggedIn: true, user: req.user });
 });
 
-// =====================================
-// Upload middleware
-// =====================================
-const upload = multer({ dest: path.join(__dirname, 'uploads') });
 
 // =====================================
-// PROJECT MASTER ROUTES
+// USER ACCESS MANAGEMENT (Admin Only)
 // =====================================
-app.get('/api/project-master/columns', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/project-master/columns', req);
-
+app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const columns = await getTableColumns(PROJECT_MASTER_TABLE, req);
-    traceEnd(trace, { outcome: 'success', rowCount: columns.length });
-    return res.json(columns);
+    const users = await queryPromise(`
+      SELECT username, access_right, updated_at, granted_by 
+      FROM ${ACCESS_TABLE} 
+      ORDER BY FIELD(access_right, 'pending', 'admin', 'user', 'viewer'), username ASC
+    `, [], req);
+    return res.json(users);
   } catch (err) {
-    traceError(trace, err);
     return res.status(500).json({ message: err.message });
   }
 });
 
-app.get('/api/project-master/options', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/project-master/options', req);
-
+app.put('/api/admin/users/:username', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const rows = await queryPromise(
-      `
-        SELECT
-          project_code,
-          project_name,
-          project_description,
-          project_type,
-          use_case_investment,
-          project_status
-        FROM ${PROJECT_MASTER_TABLE}
-        ORDER BY project_name ASC
-      `,
-      [],
-      req
-    );
+    const targetUser = req.params.username;
+    const newRole = req.body.access_right;
+    const adminUser = getCurrentUser(req);
 
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
-    return res.json(rows);
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
+    if (!['pending', 'viewer', 'user', 'admin'].includes(newRole)) return res.status(400).json({ message: 'Invalid role.' });
 
-app.get('/api/project-master', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/project-master', req);
-
-  try {
-    const rows = await queryPromise(
-      `
-        SELECT
-          project_code,
-          project_name,
-          project_description,
-          project_type,
-          use_case_investment,
-          project_status
-        FROM ${PROJECT_MASTER_TABLE}
-        ORDER BY project_name ASC
-      `,
-      [],
-      req
-    );
-
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
-    return res.json(rows);
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-app.get('/api/project-master/history/all', authenticateToken, requireAdmin, async (req, res) => {
-  const trace = traceStart('GET /api/project-master/history/all', req);
-  try {
-    const rows = await queryPromise(
-      `SELECT 
-         history_id, project_code, project_name, project_type,
-         use_case_investment, project_description, project_status, changed_by, 
-         DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at, 
-         action_type
-       FROM ${MASTER_HISTORY_TABLE}
-       ORDER BY changed_at DESC`,
-      [], req
-    );
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
-    return res.json(rows);
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-app.get('/api/project-master/:projectCode/history', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/project-master/:projectCode/history', req);
-  try {
-    const projectCode = req.params.projectCode;
-    const rows = await queryPromise(
-      `SELECT 
-         history_id, 
-         project_code, 
-         project_name, 
-         project_type,
-         use_case_investment,
-         project_description,
-         project_status,
-         changed_by, 
-         DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at, 
-         action_type
-       FROM ${MASTER_HISTORY_TABLE}
-       WHERE project_code = ?
-       ORDER BY changed_at DESC`,
-      [projectCode], 
-      req
-    );
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
-    return res.json(rows);
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-// =====================================
-// CONFIG / DROPDOWN ROUTES
-// =====================================
-app.get('/api/project-types', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/project-types', req);
-  try {
-    const rows = await queryPromise(
-      `SELECT type_name FROM t_project_types ORDER BY type_name ASC`,
-      [],
-      req
-    );
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
-    return res.json(rows.map(r => r.type_name));
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-app.post('/api/project-types', authenticateToken, requireAdmin, async (req, res) => {
-  const trace = traceStart('POST /api/project-types', req);
-  const { type_name } = req.body;
-
-  if (!type_name || !String(type_name).trim()) {
-    traceEnd(trace, { outcome: 'validation_failed' });
-    return res.status(400).json({ message: 'Project Type Name is required' });
-  }
-
-  try {
-    await queryPromise(
-      `INSERT INTO t_project_types (type_name) VALUES (?)`,
-      [String(type_name).trim()],
-      req
-    );
-
-    traceEnd(trace, { outcome: 'success', type_name });
-    res.status(201).json({ message: 'Project type added successfully' });
-  } catch (error) {
-    traceError(trace, error);
-    if (error.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'Project type already exists.' });
-    }
-    res.status(500).json({ message: 'Failed to add project type to the database' });
-  }
-});
-
-app.get('/api/project-statuses', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/project-statuses', req);
-  try {
-    const rows = await queryPromise(
-      `SELECT status_name FROM t_project_statuses ORDER BY status_name ASC`,
-      [],
-      req
-    );
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
-    return res.json(rows.map(r => r.status_name));
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-// =====================================
-// PROJECT MASTER DATA MODIFICATION
-// =====================================
-app.post('/api/project-master', authenticateToken, requireAdmin, async (req, res) => {
-  const trace = traceStart('POST /api/project-master', req);
-
-  try {
-    const payload = {
-      project_code: normalizeText(req.body.project_code),
-      project_name: normalizeText(req.body.project_name),
-      project_description: normalizeText(req.body.project_description),
-      project_type: normalizeText(req.body.project_type),
-      use_case_investment: normalizeNumber(req.body.use_case_investment),
-      project_status: normalizeText(req.body.project_status) || 'Active'
-    };
-
-    const validationError = validateProjectMasterPayload(payload);
-    if (validationError) {
-      traceEnd(trace, { outcome: 'validation_failed', validationError });
-      return res.status(400).json({ message: validationError });
-    }
-
-    const duplicate = await queryPromise(
-      `
-        SELECT project_code
-        FROM ${PROJECT_MASTER_TABLE}
-        WHERE project_code = ?
-           OR project_name = ?
-        LIMIT 1
-      `,
-      [payload.project_code, payload.project_name],
-      req
-    );
-
-    if (duplicate.length > 0) {
-      traceEnd(trace, { outcome: 'duplicate' });
-      return res.status(409).json({
-        message: 'Project code or project name already exists.'
-      });
-    }
-
-    await queryPromise(
-      `
-        INSERT INTO ${PROJECT_MASTER_TABLE}
-        (
-          project_code,
-          project_name,
-          project_description,
-          project_type,
-          use_case_investment,
-          project_status
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-      `,
-      [
-        payload.project_code,
-        payload.project_name,
-        payload.project_description,
-        payload.project_type,
-        payload.use_case_investment ?? 0,
-        payload.project_status
-      ],
-      req
-    );
-
-    const rows = await queryPromise(
-      `
-        SELECT
-          project_code,
-          project_name,
-          project_description,
-          project_type,
-          use_case_investment,
-          project_status
-        FROM ${PROJECT_MASTER_TABLE}
-        WHERE project_code = ?
-      `,
-      [payload.project_code],
-      req
-    );
-
-    traceEnd(trace, { outcome: 'success', project_code: payload.project_code });
-    return res.status(201).json(rows[0]);
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-app.put('/api/project-master/:projectCode', authenticateToken, requireAdmin, async (req, res) => {
-  const trace = traceStart('PUT /api/project-master/:projectCode', req, {
-    projectCode: req.params.projectCode
-  });
-
-  try {
-    const originalProjectCode = req.params.projectCode;
-    const currentUser = getCurrentUser(req);
-
-    const payload = {
-      project_code: normalizeText(req.body.project_code),
-      project_name: normalizeText(req.body.project_name),
-      project_description: normalizeText(req.body.project_description),
-      project_type: normalizeText(req.body.project_type),
-      use_case_investment: normalizeNumber(req.body.use_case_investment),
-      project_status: normalizeText(req.body.project_status) || 'Active'
-    };
-
-    const validationError = validateProjectMasterPayload(payload);
-    if (validationError) {
-      traceEnd(trace, { outcome: 'validation_failed', validationError });
-      return res.status(400).json({ message: validationError });
-    }
-
-    const duplicate = await queryPromise(
-      `
-        SELECT project_code
-        FROM ${PROJECT_MASTER_TABLE}
-        WHERE (project_code = ? OR project_name = ?)
-          AND project_code <> ?
-        LIMIT 1
-      `,
-      [payload.project_code, payload.project_name, originalProjectCode],
-      req
-    );
-
-    if (duplicate.length > 0) {
-      traceEnd(trace, { outcome: 'duplicate' });
-      return res.status(409).json({
-        message: 'Another project with the same code or name already exists.'
-      });
-    }
-
-    // LOG HISTORY BEFORE UPDATE
-    await queryPromise(
-      `INSERT INTO ${MASTER_HISTORY_TABLE} (
-         project_code, project_name, project_description, project_type,
-         use_case_investment, project_status, changed_by, action_type
-       )
-       SELECT
-         project_code, project_name, project_description, project_type,
-         use_case_investment, project_status, ?, 'UPDATE'
-       FROM ${PROJECT_MASTER_TABLE}
-       WHERE project_code = ?`,
-      [currentUser, originalProjectCode], req
-    );
-
-    // EXECUTE UPDATE
-    const result = await queryPromise(
-      `
-        UPDATE ${PROJECT_MASTER_TABLE}
-        SET
-          project_code = ?,
-          project_name = ?,
-          project_description = ?,
-          project_type = ?,
-          use_case_investment = ?,
-          project_status = ?
-        WHERE project_code = ?
-      `,
-      [
-        payload.project_code,
-        payload.project_name,
-        payload.project_description,
-        payload.project_type,
-        payload.use_case_investment ?? 0,
-        payload.project_status,
-        originalProjectCode
-      ],
-      req
-    );
-
+    const result = await queryPromise(`UPDATE ${ACCESS_TABLE} SET access_right = ?, granted_by = ? WHERE username = ?`, [newRole, adminUser, targetUser], req);
     if (result.affectedRows === 0) {
-      traceEnd(trace, { outcome: 'not_found' });
-      return res.status(404).json({ message: 'Project not found.' });
+      await queryPromise(`INSERT INTO ${ACCESS_TABLE} (username, access_right, granted_by) VALUES (?, ?, ?)`, [targetUser, newRole, adminUser], req);
     }
-
-    const rows = await queryPromise(
-      `
-        SELECT
-          project_code,
-          project_name,
-          project_description,
-          project_type,
-          use_case_investment,
-          project_status
-        FROM ${PROJECT_MASTER_TABLE}
-        WHERE project_code = ?
-      `,
-      [payload.project_code],
-      req
-    );
-
-    traceEnd(trace, { outcome: 'success', project_code: payload.project_code });
-    return res.json(rows[0]);
+    return res.json({ message: `Successfully updated ${targetUser} to ${newRole}.` });
   } catch (err) {
-    traceError(trace, err);
     return res.status(500).json({ message: err.message });
   }
 });
 
-app.delete('/api/project-master/:projectCode', authenticateToken, requireAdmin, async (req, res) => {
-  const trace = traceStart('DELETE /api/project-master/:projectCode', req, {
-    projectCode: req.params.projectCode
-  });
-
-  try {
-    const projectCode = req.params.projectCode;
-
-    const usage = await queryPromise(
-      `
-        SELECT COUNT(*) AS cnt
-        FROM ${PROJECT_VALUES_TABLE}
-        WHERE project_code = ?
-      `,
-      [projectCode],
-      req
-    );
-
-    if (usage[0].cnt > 0) {
-      traceEnd(trace, { outcome: 'blocked_in_use', count: usage[0].cnt });
-      return res.status(409).json({
-        message: 'Cannot delete project master row because project values already exist for this project.'
-      });
-    }
-
-    const result = await queryPromise(
-      `
-        DELETE FROM ${PROJECT_MASTER_TABLE}
-        WHERE project_code = ?
-      `,
-      [projectCode],
-      req
-    );
-
-    if (result.affectedRows === 0) {
-      traceEnd(trace, { outcome: 'not_found' });
-      return res.status(404).json({ message: 'Project not found.' });
-    }
-
-    traceEnd(trace, { outcome: 'success', projectCode });
-    return res.json({ message: 'Project deleted successfully.' });
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-app.post('/api/project-master/upload-excel', authenticateToken, requireAdmin, upload.single('file'), async (req, res) => {
-  const trace = traceStart('POST /api/project-master/upload-excel', req);
-
-  if (!req.file) {
-    traceEnd(trace, { outcome: 'no_file' });
-    return res.status(400).json({ message: 'No file uploaded.' });
-  }
-
-  const currentUser = getCurrentUser(req);
-  const filePath = req.file.path;
-
-  try {
-    const workbook = XLSX.readFile(filePath);
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
-
-    const expectedColumns = [
-      'project_code',
-      'project_name',
-      'project_type'
-    ];
-
-    const firstRowColumns = rows.length > 0 ? Object.keys(rows[0]) : [];
-    const missing = expectedColumns.filter(col => !firstRowColumns.includes(col));
-
-    if (missing.length > 0) {
-      traceEnd(trace, { outcome: 'missing_columns', missing });
-      return res.status(400).json({
-        message: `Excel missing columns: ${missing.join(', ')}`
-      });
-    }
-
-    let inserted = 0;
-    let updated = 0;
-
-    for (const row of rows) {
-      const payload = {
-        project_code: normalizeText(row['project_code']),
-        project_name: normalizeText(row['project_name']),
-        project_description: normalizeText(row['project_description']),
-        project_type: normalizeText(row['project_type']),
-        use_case_investment: normalizeNumber(row['use_case_investment']),
-        project_status: normalizeText(row['project_status']) || 'Active'
-      };
-
-      const validationError = validateProjectMasterPayload(payload);
-      if (validationError) continue;
-
-      const existing = await queryPromise(
-        `
-          SELECT project_code
-          FROM ${PROJECT_MASTER_TABLE}
-          WHERE project_code = ?
-          LIMIT 1
-        `,
-        [payload.project_code],
-        req
-      );
-
-      if (existing.length > 0) {
-        // LOG HISTORY BEFORE UPDATE
-        await queryPromise(
-          `INSERT INTO ${MASTER_HISTORY_TABLE} (
-             project_code, project_name, project_description, project_type,
-             use_case_investment, project_status, changed_by, action_type
-           )
-           SELECT
-             project_code, project_name, project_description, project_type,
-             use_case_investment, project_status, ?, 'UPDATE'
-           FROM ${PROJECT_MASTER_TABLE}
-           WHERE project_code = ?`,
-          [currentUser, payload.project_code], req
-        );
-
-        await queryPromise(
-          `
-            UPDATE ${PROJECT_MASTER_TABLE}
-            SET
-              project_name = ?,
-              project_description = ?,
-              project_type = ?,
-              use_case_investment = ?,
-              project_status = ?
-            WHERE project_code = ?
-          `,
-          [
-            payload.project_name,
-            payload.project_description,
-            payload.project_type,
-            payload.use_case_investment ?? 0,
-            payload.project_status,
-            payload.project_code
-          ],
-          req
-        );
-        updated += 1;
-      } else {
-        await queryPromise(
-          `
-            INSERT INTO ${PROJECT_MASTER_TABLE}
-            (
-              project_code,
-              project_name,
-              project_description,
-              project_type,
-              use_case_investment,
-              project_status
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-          `,
-          [
-            payload.project_code,
-            payload.project_name,
-            payload.project_description,
-            payload.project_type,
-            payload.use_case_investment ?? 0,
-            payload.project_status
-          ],
-          req
-        );
-        inserted += 1;
-      }
-    }
-
-    traceEnd(trace, { outcome: 'success', inserted, updated });
-    return res.json({
-      message: `Project master Excel upload completed. Inserted: ${inserted}, Updated: ${updated}.`
-    });
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message || 'Excel upload failed.' });
-  } finally {
-    safeUnlink(filePath);
-  }
-});
 
 // =====================================
-// PROJECT VALUES ROUTES
+// MASTER DATA (Config/Dropdowns)
 // =====================================
-app.get('/api/project-values/columns', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/project-values/columns', req);
-
+app.get('/api/config/options', authenticateToken, requireAccess, async (req, res) => {
   try {
-    const columns = await getTableColumns(PROJECT_VALUES_TABLE, req);
-    traceEnd(trace, { outcome: 'success', rowCount: columns.length });
-    return res.json(columns);
+    const rows = await queryPromise(`SELECT category, value FROM ${CONFIG_TABLE} WHERE is_active = 1 ORDER BY category, value ASC`, [], req);
+    const options = rows.reduce((acc, row) => {
+      if (!acc[row.category]) acc[row.category] = [];
+      acc[row.category].push(row.value);
+      return acc;
+    }, {});
+    return res.json(options);
   } catch (err) {
-    traceError(trace, err);
     return res.status(500).json({ message: err.message });
   }
 });
 
-app.get('/api/project-values', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/project-values', req);
-
+app.post('/api/config/options', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const rows = await queryPromise(
-      `
-        SELECT
-          v.metric_id,
-          v.project_code,
-          m.project_name,
-          m.project_type,
-          m.project_description,
-          m.project_status,
-          m.use_case_investment,
-          DATE_FORMAT(v.month_end, '%Y-%m-%d') AS month_end,
-          v.capacity_improvement,
-          v.people_productivity,
-          v.quality_improvement,
-          v.yield_savings
-        FROM ${PROJECT_VALUES_TABLE} v
-        LEFT JOIN ${PROJECT_MASTER_TABLE} m
-          ON v.project_code = m.project_code
-        ORDER BY v.month_end DESC, m.project_name ASC
-      `,
-      [],
-      req
-    );
-
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
-    return res.json(rows);
+    const { category, value } = req.body;
+    await queryPromise(`INSERT INTO ${CONFIG_TABLE} (category, value, is_active) VALUES (?, ?, 1)`, [category, value], req);
+    return res.status(201).json({ message: `${value} added to ${category} successfully.` });
   } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
+    return res.status(500).json({ message: 'Failed to add option. It may already exist.' });
   }
 });
 
-app.get('/api/project-values/history/all', authenticateToken, requireAdmin, async (req, res) => {
-  const trace = traceStart('GET /api/project-values/history/all', req);
-  try {
-    const rows = await queryPromise(
-      `SELECT 
-         history_id, metric_id, project_code, 
-         DATE_FORMAT(month_end, '%Y-%m-%d') AS month_end,
-         capacity_improvement, yield_savings, people_productivity, quality_improvement,
-         changed_by, DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at, 
-         action_type
-       FROM ${HISTORY_TABLE}
-       ORDER BY changed_at DESC`,
-      [], req
-    );
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
-    return res.json(rows);
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-app.get('/api/project-values/:metricId/history', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/project-values/:metricId/history', req);
-  try {
-    const metricId = req.params.metricId;
-    const rows = await queryPromise(
-      `SELECT 
-         history_id, 
-         metric_id, 
-         project_code, 
-         DATE_FORMAT(month_end, '%Y-%m-%d') AS month_end,
-         capacity_improvement, 
-         yield_savings, 
-         people_productivity, 
-         quality_improvement,
-         changed_by, 
-         DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at, 
-         action_type
-       FROM ${HISTORY_TABLE}
-       WHERE metric_id = ?
-       ORDER BY changed_at DESC`,
-      [metricId], 
-      req
-    );
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
-    return res.json(rows);
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-app.post('/api/project-values', authenticateToken, async (req, res) => {
-  const trace = traceStart('POST /api/project-values', req);
-
-  try {
-    const payload = {
-      project_code: normalizeText(req.body.project_code),
-      project_name: normalizeText(req.body.project_name),
-      month_end: parseStandardDate(req.body.month_end), 
-      capacity_improvement: normalizeNumber(req.body.capacity_improvement),
-      people_productivity: normalizeNumber(req.body.people_productivity),
-      quality_improvement: normalizeNumber(req.body.quality_improvement),
-      yield_savings: normalizeNumber(req.body.yield_savings)
-    };
-
-    const validationError = validateProjectValuePayload(payload);
-    if (validationError) {
-      traceEnd(trace, { outcome: 'validation_failed', validationError });
-      return res.status(400).json({ message: validationError });
-    }
-
-    const project = await resolveProject(req, payload);
-    if (!project) {
-      traceEnd(trace, { outcome: 'project_not_found' });
-      return res.status(400).json({
-        message: 'Selected project does not exist in project master.'
-      });
-    }
-
-    const existing = await queryPromise(
-      `SELECT metric_id FROM ${PROJECT_VALUES_TABLE} WHERE project_code = ? AND CAST(month_end AS DATE) = CAST(? AS DATE)`,
-      [project.project_code, payload.month_end], req
-    );
-
-    if (existing.length > 0) {
-      traceEnd(trace, { outcome: 'duplicate_prevented' });
-      return res.status(409).json({
-        message: `Data for ${project.project_name || project.project_code} for month ending ${payload.month_end} already exists. Please select it from the table and click 'Update' instead.`
-      });
-    }
-
-    const result = await queryPromise(
-      `
-        INSERT INTO ${PROJECT_VALUES_TABLE}
-        (
-          project_code,
-          month_end,
-          capacity_improvement,
-          people_productivity,
-          quality_improvement,
-          yield_savings
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-      `,
-      [
-        project.project_code,
-        payload.month_end,
-        payload.capacity_improvement,
-        payload.people_productivity,
-        payload.quality_improvement,
-        payload.yield_savings
-      ],
-      req
-    );
-
-    const rows = await queryPromise(
-      `
-        SELECT
-          v.metric_id,
-          v.project_code,
-          m.project_name,
-          m.project_type,
-          m.project_description,
-          m.project_status,
-          m.use_case_investment,
-          DATE_FORMAT(v.month_end, '%Y-%m-%d') AS month_end,
-          v.capacity_improvement,
-          v.people_productivity,
-          v.quality_improvement,
-          v.yield_savings
-        FROM ${PROJECT_VALUES_TABLE} v
-        LEFT JOIN ${PROJECT_MASTER_TABLE} m
-          ON v.project_code = m.project_code
-        WHERE v.metric_id = ?
-      `,
-      [result.insertId],
-      req
-    );
-
-    traceEnd(trace, { outcome: 'success', metric_id: result.insertId });
-    return res.status(201).json(rows[0]);
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-app.put('/api/project-values/:metricId', authenticateToken, async (req, res) => {
-  const trace = traceStart('PUT /api/project-values/:metricId', req, {
-    metricId: req.params.metricId
-  });
-
-  try {
-    const metricId = req.params.metricId;
-    const currentUser = getCurrentUser(req);
-
-    const payload = {
-      project_code: normalizeText(req.body.project_code),
-      project_name: normalizeText(req.body.project_name),
-      month_end: parseStandardDate(req.body.month_end), 
-      capacity_improvement: normalizeNumber(req.body.capacity_improvement),
-      people_productivity: normalizeNumber(req.body.people_productivity),
-      quality_improvement: normalizeNumber(req.body.quality_improvement),
-      yield_savings: normalizeNumber(req.body.yield_savings)
-    };
-
-    const validationError = validateProjectValuePayload(payload);
-    if (validationError) {
-      traceEnd(trace, { outcome: 'validation_failed', validationError });
-      return res.status(400).json({ message: validationError });
-    }
-
-    const project = await resolveProject(req, payload);
-    if (!project) {
-      traceEnd(trace, { outcome: 'project_not_found' });
-      return res.status(400).json({
-        message: 'Selected project does not exist in project master.'
-      });
-    }
-
-    const existing = await queryPromise(
-      `SELECT metric_id FROM ${PROJECT_VALUES_TABLE} WHERE project_code = ? AND CAST(month_end AS DATE) = CAST(? AS DATE) AND metric_id != ?`,
-      [project.project_code, payload.month_end, metricId], req
-    );
-
-    if (existing.length > 0) {
-      traceEnd(trace, { outcome: 'update_conflict_prevented' });
-      return res.status(409).json({
-        message: `Cannot update: A different record for ${project.project_name || project.project_code} already exists for month ending ${payload.month_end}.`
-      });
-    }
-
-    await queryPromise(
-      `INSERT INTO ${HISTORY_TABLE} (
-         metric_id, project_code, month_end, capacity_improvement,
-         yield_savings, people_productivity, quality_improvement,
-         changed_by, action_type
-       )
-       SELECT
-         metric_id, project_code, month_end, capacity_improvement,
-         yield_savings, people_productivity, quality_improvement,
-         ?, 'UPDATE'
-       FROM ${PROJECT_VALUES_TABLE}
-       WHERE metric_id = ?`,
-      [currentUser, metricId], req
-    );
-
-    const result = await queryPromise(
-      `
-        UPDATE ${PROJECT_VALUES_TABLE}
-        SET
-          project_code = ?,
-          month_end = ?,
-          capacity_improvement = ?,
-          people_productivity = ?,
-          quality_improvement = ?,
-          yield_savings = ?
-        WHERE metric_id = ?
-      `,
-      [
-        project.project_code,
-        payload.month_end,
-        payload.capacity_improvement,
-        payload.people_productivity,
-        payload.quality_improvement,
-        payload.yield_savings,
-        metricId
-      ],
-      req
-    );
-
-    if (result.affectedRows === 0) {
-      traceEnd(trace, { outcome: 'not_found' });
-      return res.status(404).json({ message: 'Project value row not found.' });
-    }
-
-    const rows = await queryPromise(
-      `
-        SELECT
-          v.metric_id,
-          v.project_code,
-          m.project_name,
-          m.project_type,
-          m.project_description,
-          m.project_status,
-          m.use_case_investment,
-          DATE_FORMAT(v.month_end, '%Y-%m-%d') AS month_end,
-          v.capacity_improvement,
-          v.people_productivity,
-          v.quality_improvement,
-          v.yield_savings
-        FROM ${PROJECT_VALUES_TABLE} v
-        LEFT JOIN ${PROJECT_MASTER_TABLE} m
-          ON v.project_code = m.project_code
-        WHERE v.metric_id = ?
-      `,
-      [metricId],
-      req
-    );
-
-    traceEnd(trace, { outcome: 'success', metricId });
-    return res.json(rows[0]);
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-app.delete('/api/project-values/:metricId', authenticateToken, requireAdmin, async (req, res) => {
-  const trace = traceStart('DELETE /api/project-values/:metricId', req, {
-    metricId: req.params.metricId
-  });
-
-  try {
-    const metricId = req.params.metricId;
-
-    const result = await queryPromise(
-      `
-        DELETE FROM ${PROJECT_VALUES_TABLE}
-        WHERE metric_id = ?
-      `,
-      [metricId],
-      req
-    );
-
-    if (result.affectedRows === 0) {
-      traceEnd(trace, { outcome: 'not_found' });
-      return res.status(404).json({ message: 'Project value row not found.' });
-    }
-
-    traceEnd(trace, { outcome: 'success', metricId });
-    return res.json({ message: 'Project value row deleted successfully.' });
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message });
-  }
-});
-
-app.post('/api/project-values/import', authenticateToken, upload.single('file'), async (req, res) => {
-  const trace = traceStart('POST /api/project-values/import', req);
-
-  if (!req.file) {
-    traceEnd(trace, { outcome: 'no_file' });
-    return res.status(400).json({ message: 'No file uploaded.' });
-  }
-
-  const overwrite = req.body.overwrite === 'true';
-  const currentUser = getCurrentUser(req);
-
-  const filePath = req.file.path;
-  const errors = [];
-
-  try {
-    const workbook = XLSX.readFile(filePath);
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
-
-    const minimumColumns = [
-      'month_end',
-      'capacity_improvement',
-      'people_productivity',
-      'quality_improvement',
-      'yield_savings'
-    ];
-
-    const firstRowColumns = rows.length > 0 ? Object.keys(rows[0]) : [];
-    const missingMinimum = minimumColumns.filter(col => !firstRowColumns.includes(col));
-
-    if (missingMinimum.length > 0) {
-      traceEnd(trace, { outcome: 'missing_columns', missingMinimum });
-      return res.status(400).json({
-        message: `Excel missing columns: ${missingMinimum.join(', ')}`
-      });
-    }
-
-    const hasProjectCodeColumn = firstRowColumns.includes('project_code');
-    const hasProjectNameColumn = firstRowColumns.includes('project_name');
-
-    if (!hasProjectCodeColumn && !hasProjectNameColumn) {
-      traceEnd(trace, { outcome: 'missing_project_identifier' });
-      return res.status(400).json({
-        message: 'Excel must contain either "project_code" or "project_name".'
-      });
-    }
-
-    let inserted = 0;
-    let updated = 0;
-    let failed = 0;
-
-    const parsedMap = new Map();
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      try {
-        const payload = {
-          project_code: normalizeText(row['project_code']),
-          project_name: normalizeText(row['project_name']),
-          month_end: parseStandardDate(row['month_end']), 
-          capacity_improvement: normalizeNumber(row['capacity_improvement']),
-          people_productivity: normalizeNumber(row['people_productivity']),
-          quality_improvement: normalizeNumber(row['quality_improvement']),
-          yield_savings: normalizeNumber(row['yield_savings'])
-        };
-
-        const validationError = validateProjectValuePayload(payload);
-        if (validationError) throw new Error(validationError);
-
-        const project = await resolveProject(req, payload);
-        if (!project) throw new Error('Project not found in project master.');
-        
-        payload.resolved_project_code = project.project_code;
-
-        const uniqueKey = `${payload.resolved_project_code}_${payload.month_end}`;
-        parsedMap.set(uniqueKey, payload);
-
-      } catch (rowErr) {
-        failed += 1;
-        errors.push({ row: i + 2, message: rowErr.message });
-      }
-    }
-
-    const uniquePayloads = Array.from(parsedMap.values());
-
-    for (const payload of uniquePayloads) {
-      const existing = await queryPromise(
-        `SELECT metric_id FROM ${PROJECT_VALUES_TABLE} WHERE project_code = ? AND CAST(month_end AS DATE) = CAST(? AS DATE)`,
-        [payload.resolved_project_code, payload.month_end], req
-      );
-
-      if (existing.length > 0) {
-        if (!overwrite) {
-          return res.status(409).json({ 
-            requires_confirmation: true, 
-            message: 'Duplicate months detected. Waiting for user confirmation.' 
-          });
-        }
-        payload.metric_id = existing[0].metric_id;
-        payload.isUpdate = true;
-      } else {
-        payload.isUpdate = false;
-      }
-    }
-
-    for (const payload of uniquePayloads) {
-      if (payload.isUpdate) {
-        
-        await queryPromise(
-          `INSERT INTO ${HISTORY_TABLE} (
-             metric_id, project_code, month_end, capacity_improvement,
-             yield_savings, people_productivity, quality_improvement,
-             changed_by, action_type
-           )
-           SELECT
-             metric_id, project_code, month_end, capacity_improvement,
-             yield_savings, people_productivity, quality_improvement,
-             ?, 'UPDATE'
-           FROM ${PROJECT_VALUES_TABLE}
-           WHERE metric_id = ?`,
-          [currentUser, payload.metric_id], req
-        );
-
-        await queryPromise(
-          `UPDATE ${PROJECT_VALUES_TABLE} SET capacity_improvement=?, people_productivity=?, quality_improvement=?, yield_savings=? WHERE metric_id=?`,
-          [payload.capacity_improvement, payload.people_productivity, payload.quality_improvement, payload.yield_savings, payload.metric_id], req
-        );
-        updated += 1;
-      } else {
-        await queryPromise(
-          `INSERT INTO ${PROJECT_VALUES_TABLE} (project_code, month_end, capacity_improvement, people_productivity, quality_improvement, yield_savings) VALUES (?, ?, ?, ?, ?, ?)`,
-          [payload.resolved_project_code, payload.month_end, payload.capacity_improvement, payload.people_productivity, payload.quality_improvement, payload.yield_savings], req
-        );
-        inserted += 1;
-      }
-    }
-
-    traceEnd(trace, { outcome: 'success', total: rows.length, inserted, updated, failed });
-
-    return res.json({
-      message: `Import completed. Inserted: ${inserted}, Updated: ${updated}, Failed: ${failed}.`,
-      summary: { total: rows.length, inserted, updated, failed },
-      errors
-    });
-
-  } catch (err) {
-    traceError(trace, err);
-    return res.status(500).json({ message: err.message || 'Excel import failed.' });
-  } finally {
-    safeUnlink(filePath);
-  }
-});
 
 // =====================================
-// MANAGER YEARLY TRACKING ROUTES
+// BEM PROJECT DATA (Manager Yearly)
 // =====================================
 
-app.get('/api/manager-yearly', authenticateToken, async (req, res) => {
+app.get('/api/manager-yearly', authenticateToken, requireAccess, async (req, res) => {
   const trace = traceStart('GET /api/manager-yearly', req);
-
   try {
-    const projects = await bemQueryPromise(`SELECT * FROM ${MANAGER_PROJECTS_TABLE} ORDER BY project_name ASC`, [], req);
-    const yearlyValues = await bemQueryPromise(`SELECT * FROM ${MANAGER_YEARLY_TABLE}`, [], req);
+    const projects = await queryPromise(`SELECT * FROM ${MANAGER_PROJECTS_TABLE} ORDER BY project_name ASC`, [], req);
+    const yearlyValues = await queryPromise(`SELECT * FROM ${MANAGER_YEARLY_TABLE}`, [], req);
     
-    // Fetch the latest metrics per project
-    const metrics = await bemQueryPromise(`
+    const metrics = await queryPromise(`
       SELECT m.* FROM ${MANAGER_METRICS_TABLE} m
-      INNER JOIN (
-        SELECT project_id, MAX(reporting_year) as max_year 
-        FROM ${MANAGER_METRICS_TABLE} 
-        GROUP BY project_id
-      ) latest ON m.project_id = latest.project_id AND m.reporting_year = latest.max_year
+      INNER JOIN (SELECT project_id, MAX(reporting_year) as max_year FROM ${MANAGER_METRICS_TABLE} GROUP BY project_id) latest 
+      ON m.project_id = latest.project_id AND m.reporting_year = latest.max_year
     `, [], req);
 
-    // Fetch the latest comment per project
-    const comments = await bemQueryPromise(`
+    const comments = await queryPromise(`
       SELECT c.* FROM ${MANAGER_COMMENTS_TABLE} c
-      INNER JOIN (
-        SELECT project_id, MAX(created_at) as max_date 
-        FROM ${MANAGER_COMMENTS_TABLE} 
-        GROUP BY project_id
-      ) latest ON c.project_id = latest.project_id AND c.created_at = latest.max_date
+      INNER JOIN (SELECT project_id, MAX(created_at) as max_date FROM ${MANAGER_COMMENTS_TABLE} GROUP BY project_id) latest 
+      ON c.project_id = latest.project_id AND c.created_at = latest.max_date
     `, [], req);
 
-    // --- NEW: Fetch Actual Dates from the Phases Ledger ---
-    const phases = await bemQueryPromise(`
+    const phases = await queryPromise(`
       SELECT project_id, phase_name, DATE_FORMAT(MIN(start_date), '%Y-%m-%d') as actual_start 
-      FROM ${MANAGER_PHASES_TABLE} 
-      WHERE phase_name IN ('G1', 'G2', 'G3') 
-      GROUP BY project_id, phase_name
+      FROM ${MANAGER_PHASES_TABLE} WHERE phase_name IN ('G1', 'G2', 'G3') GROUP BY project_id, phase_name
     `, [], req);
 
     const result = projects.map(proj => {
       const projMetrics = metrics.find(m => m.project_id === proj.project_id) || {};
       const projComment = comments.find(c => c.project_id === proj.project_id) || {};
-
-      // Match actual start dates from ledger
       const g1 = phases.find(p => p.project_id === proj.project_id && p.phase_name === 'G1');
       const g2 = phases.find(p => p.project_id === proj.project_id && p.phase_name === 'G2');
       const g3 = phases.find(p => p.project_id === proj.project_id && p.phase_name === 'G3');
@@ -1643,22 +393,14 @@ app.get('/api/manager-yearly', authenticateToken, async (req, res) => {
         dtitInvolved: proj.dtit_involved,
         aiAaAType: proj.ai_type,
         foakNoak: proj.foak_noak,
-        
-        // Target Timeline Dates
         targetG1Date: proj.target_g1_date || null,
         targetG2Date: proj.target_g2_date || null,
         targetG3Date: proj.target_g3_date || null,
         targetClosedDate: proj.target_closed_date || null,
-
-        // --- NEW: Actual Timeline Dates (Sourced directly from historical ledger) ---
         actualG1Date: g1 ? g1.actual_start : null,
         actualG2Date: g2 ? g2.actual_start : null,
         actualG3Date: g3 ? g3.actual_start : null,
-
-        // Mapped from t_manager_comments
         comment: projComment.comment_text || null,
-
-        // Mapped from t_manager_metrics
         capacityGainValue: projMetrics.capacity_gain_value || null,
         capacityGainPercent: projMetrics.capacity_gain_pct || null,
         dlValue: projMetrics.dl_value || null,
@@ -1671,11 +413,8 @@ app.get('/api/manager-yearly', authenticateToken, async (req, res) => {
         qualityCases: projMetrics.quality_cases || null
       };
 
-      // Mapped from t_manager_yearly_savings
       const projYears = yearlyValues.filter(y => y.project_id === proj.project_id);
-      projYears.forEach(y => {
-        payload[`year${y.savings_year}`] = y.savings_value;
-      });
+      projYears.forEach(y => { payload[`year${y.savings_year}`] = y.savings_value; });
 
       return payload;
     });
@@ -1688,27 +427,19 @@ app.get('/api/manager-yearly', authenticateToken, async (req, res) => {
   }
 });
 
-// --- NEW ROUTE: Pipeline Velocity (Monthly Throughput) ---
-app.get('/api/manager-yearly/pipeline-velocity', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/manager-yearly/pipeline-velocity', req);
+app.get('/api/manager-yearly/pipeline-velocity', authenticateToken, requireAccess, async (req, res) => {
   try {
-    // Automatically groups ledger records by month/year and counts G1/G2/G3 entrances
-    const rows = await bemQueryPromise(`
+    const rows = await queryPromise(`
       SELECT 
-        DATE_FORMAT(start_date, '%Y-%m') AS month_key,
-        DATE_FORMAT(start_date, '%b %Y') AS month_label,
+        DATE_FORMAT(start_date, '%Y-%m') AS month_key, DATE_FORMAT(start_date, '%b %Y') AS month_label,
         SUM(CASE WHEN phase_name = 'G1' THEN 1 ELSE 0 END) AS g1_count,
         SUM(CASE WHEN phase_name = 'G2' THEN 1 ELSE 0 END) AS g2_count,
         SUM(CASE WHEN phase_name = 'G3' THEN 1 ELSE 0 END) AS g3_count,
         COUNT(*) AS total_transitions
       FROM ${MANAGER_PHASES_TABLE}
-      WHERE phase_name IN ('G1', 'G2', 'G3')
-      GROUP BY month_key, month_label
-      ORDER BY month_key DESC
-      LIMIT 12
+      WHERE phase_name IN ('G1', 'G2', 'G3') GROUP BY month_key, month_label ORDER BY month_key DESC LIMIT 12
     `, [], req);
 
-    // Clean up the formatting so Vue can directly inject it into the table
     const formattedData = rows.map(r => ({
       month: r.month_label,
       g1: Number(r.g1_count),
@@ -1716,80 +447,52 @@ app.get('/api/manager-yearly/pipeline-velocity', authenticateToken, async (req, 
       g3: Number(r.g3_count),
       total: Number(r.total_transitions)
     }));
-
-    traceEnd(trace, { outcome: 'success', rowCount: formattedData.length });
     return res.json(formattedData);
   } catch (err) {
-    traceError(trace, err);
     return res.status(500).json({ message: err.message });
   }
 });
 
-// Manager Site Targets Route
-app.get('/api/manager-site-targets', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/manager-site-targets', req);
+app.get('/api/manager-site-targets', authenticateToken, requireAccess, async (req, res) => {
   try {
-    const rows = await bemQueryPromise(`SELECT * FROM ${MANAGER_SITE_TARGETS_TABLE}`, [], req);
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
+    const rows = await queryPromise(`SELECT * FROM ${MANAGER_SITE_TARGETS_TABLE}`, [], req);
     return res.json(rows);
   } catch (err) {
-    traceError(trace, err);
     return res.status(500).json({ message: err.message });
   }
 });
 
-// Global Audit Log Route
 app.get('/api/manager-yearly/history/all', authenticateToken, requireAdmin, async (req, res) => {
-  const trace = traceStart('GET /api/manager-yearly/history/all', req);
   try {
-    const rows = await bemQueryPromise(
-      `SELECT 
-         history_id, project_id, project_name, project_status, 
-         capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent,
-         idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases, comment_text,
-         changed_by, DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at, 
-         action_type
-       FROM ${MANAGER_HISTORY_TABLE}
-       ORDER BY changed_at DESC`,
-      [], req
-    );
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
+    const rows = await queryPromise(`
+      SELECT history_id, project_id, project_name, project_status, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent,
+             idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases, comment_text, changed_by, DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at, action_type
+      FROM ${MANAGER_HISTORY_TABLE} ORDER BY changed_at DESC
+    `, [], req);
     return res.json(rows);
   } catch (err) {
-    traceError(trace, err);
     return res.status(500).json({ message: err.message });
   }
 });
 
-// Project-Level History Route
-app.get('/api/manager-yearly/:projectId/history', authenticateToken, async (req, res) => {
-  const trace = traceStart('GET /api/manager-yearly/:projectId/history', req);
+app.get('/api/manager-yearly/:projectId/history', authenticateToken, requireAccess, async (req, res) => {
   try {
-    const projectId = req.params.projectId;
-    const rows = await bemQueryPromise(
-      `SELECT 
-         history_id, project_id, project_name, project_status, 
-         capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent,
-         idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases, comment_text,
-         changed_by, DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at, 
-         action_type
-       FROM ${MANAGER_HISTORY_TABLE}
-       WHERE project_id = ?
-       ORDER BY changed_at DESC`,
-      [projectId], 
-      req
-    );
-    traceEnd(trace, { outcome: 'success', rowCount: rows.length });
+    const rows = await queryPromise(`
+      SELECT history_id, project_id, project_name, project_status, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent,
+             idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases, comment_text, changed_by, DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at, action_type
+      FROM ${MANAGER_HISTORY_TABLE} WHERE project_id = ? ORDER BY changed_at DESC
+    `, [req.params.projectId], req);
     return res.json(rows);
   } catch (err) {
-    traceError(trace, err);
     return res.status(500).json({ message: err.message });
   }
 });
 
-app.post('/api/manager-yearly', authenticateToken, requireAdmin, async (req, res) => {
+// =====================================
+// DATA MODIFICATION (Users & Admins Only)
+// =====================================
+app.post('/api/manager-yearly', authenticateToken, requireEditAccess, async (req, res) => {
   const trace = traceStart('POST /api/manager-yearly', req);
-
   try {
     const payload = {
       project_id: normalizeText(req.body.projectId),
@@ -1801,56 +504,33 @@ app.post('/api/manager-yearly', authenticateToken, requireAdmin, async (req, res
       dtit_involved: normalizeText(req.body.dtitInvolved),
       ai_aa_a_type: normalizeText(req.body.aiAaAType),
       foak_noak: normalizeText(req.body.foakNoak),
-      // --- NEW: Added Target Timeline Dates ---
       target_g1_date: parseStandardDate(req.body.targetG1Date),
       target_g2_date: parseStandardDate(req.body.targetG2Date),
       target_g3_date: parseStandardDate(req.body.targetG3Date),
       target_closed_date: parseStandardDate(req.body.targetClosedDate)
     };
 
-    if (!payload.project_id || !payload.project_name) {
-      traceEnd(trace, { outcome: 'validation_failed' });
-      return res.status(400).json({ message: 'Project ID and Project Name are required.' });
-    }
+    if (!payload.project_id || !payload.project_name) return res.status(400).json({ message: 'Project ID and Project Name are required.' });
 
-    // Insert only the metadata. The chained PUT request from Vue handles the financial/KPI arrays.
-    await bemQueryPromise(
-      `
-        INSERT INTO ${MANAGER_PROJECTS_TABLE}
-        (
-          project_id, project_name, project_status, pillar, site, current_pmo_gate, dtit_involved, ai_type, foak_noak,
-          target_g1_date, target_g2_date, target_g3_date, target_closed_date
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-      [
-        payload.project_id, payload.project_name, payload.project_status, payload.pillars, payload.sites,
-        payload.current_pmo_gate, payload.dtit_involved, payload.ai_aa_a_type, payload.foak_noak,
-        payload.target_g1_date, payload.target_g2_date, payload.target_g3_date, payload.target_closed_date
-      ],
-      req
-    );
+    await queryPromise(`
+      INSERT INTO ${MANAGER_PROJECTS_TABLE} (project_id, project_name, project_status, pillar, site, current_pmo_gate, dtit_involved, ai_type, foak_noak, target_g1_date, target_g2_date, target_g3_date, target_closed_date)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [payload.project_id, payload.project_name, payload.project_status, payload.pillars, payload.sites, payload.current_pmo_gate, payload.dtit_involved, payload.ai_aa_a_type, payload.foak_noak, payload.target_g1_date, payload.target_g2_date, payload.target_g3_date, payload.target_closed_date], req);
 
-    // --- NEW: Open initial phase in ledger if a status was provided ---
     if (payload.project_status) {
-      await bemQueryPromise(
-        `INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`,
-        [payload.project_id, payload.project_status], req
-      );
+      await queryPromise(`INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`, [payload.project_id, payload.project_status], req);
     }
 
     traceEnd(trace, { outcome: 'success', project_id: payload.project_id });
     return res.status(201).json({ message: 'Project created successfully.', project_id: payload.project_id });
   } catch (err) {
     traceError(trace, err);
-    if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'Project ID already exists.' });
-    }
+    if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ message: 'Project ID already exists.' });
     return res.status(500).json({ message: err.message });
   }
 });
 
-app.put('/api/manager-yearly/:projectId', authenticateToken, requireAdmin, async (req, res) => {
+app.put('/api/manager-yearly/:projectId', authenticateToken, requireEditAccess, async (req, res) => {
   const trace = traceStart('PUT /api/manager-yearly/:projectId', req, { projectId: req.params.projectId });
 
   try {
@@ -1858,150 +538,73 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireAdmin, async
     const currentUser = getCurrentUser(req);
     const currentYear = new Date().getFullYear();
 
-    // Parse the new incoming target dates
     const targetG1Date = parseStandardDate(req.body.targetG1Date);
     const targetG2Date = parseStandardDate(req.body.targetG2Date);
     const targetG3Date = parseStandardDate(req.body.targetG3Date);
     const targetClosedDate = parseStandardDate(req.body.targetClosedDate);
 
-    // --- 0. LOG HISTORY BEFORE UPDATE ---
-    const currentState = await bemQueryPromise(`
-      SELECT 
-        p.project_name, p.project_status,
-        m.capacity_gain_value, m.capacity_gain_pct, m.dl_value, m.dl_equivalent, 
-        m.idl_value, m.idl_fte, m.yield_value, m.yield_gain_pct, 
-        m.quality_value, m.quality_cases, 
-        c.comment_text
+    const currentState = await queryPromise(`
+      SELECT p.project_name, p.project_status, m.capacity_gain_value, m.capacity_gain_pct, m.dl_value, m.dl_equivalent, 
+             m.idl_value, m.idl_fte, m.yield_value, m.yield_gain_pct, m.quality_value, m.quality_cases, c.comment_text
       FROM ${MANAGER_PROJECTS_TABLE} p
       LEFT JOIN ${MANAGER_METRICS_TABLE} m ON p.project_id = m.project_id AND m.reporting_year = ?
       LEFT JOIN ${MANAGER_COMMENTS_TABLE} c ON p.project_id = c.project_id
-      WHERE p.project_id = ?
-      ORDER BY c.created_at DESC LIMIT 1
+      WHERE p.project_id = ? ORDER BY c.created_at DESC LIMIT 1
     `, [currentYear, projectId], req);
 
     if (currentState.length > 0) {
       const curr = currentState[0];
-      await bemQueryPromise(`
-        INSERT INTO ${MANAGER_HISTORY_TABLE} (
-          project_id, project_name, project_status, capacity_gain_value, capacity_gain_pct, 
-          dl_value, dl_equivalent, idl_value, idl_fte, yield_value, yield_gain_pct, 
-          quality_value, quality_cases, comment_text, changed_by, action_type
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPDATE')
-      `, [
-        projectId, curr.project_name, curr.project_status, curr.capacity_gain_value, curr.capacity_gain_pct,
-        curr.dl_value, curr.dl_equivalent, curr.idl_value, curr.idl_fte, curr.yield_value, curr.yield_gain_pct,
-        curr.quality_value, curr.quality_cases, curr.comment_text, currentUser
-      ], req);
+      await queryPromise(`
+        INSERT INTO ${MANAGER_HISTORY_TABLE} (project_id, project_name, project_status, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent, idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases, comment_text, changed_by, action_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPDATE')
+      `, [projectId, curr.project_name, curr.project_status, curr.capacity_gain_value, curr.capacity_gain_pct, curr.dl_value, curr.dl_equivalent, curr.idl_value, curr.idl_fte, curr.yield_value, curr.yield_gain_pct, curr.quality_value, curr.quality_cases, curr.comment_text, currentUser], req);
     }
 
-    // --- 1. Update Project Master (Metadata) ---
     if (req.body.projectName) {
       const newStatus = normalizeText(req.body.projectStatus);
       
-      await bemQueryPromise(
-        `UPDATE ${MANAGER_PROJECTS_TABLE} 
-         SET project_name = ?, project_status = ?, pillar = ?, site = ?, current_pmo_gate = ?, dtit_involved = ?, ai_type = ?, foak_noak = ?,
-             target_g1_date = ?, target_g2_date = ?, target_g3_date = ?, target_closed_date = ?
-         WHERE project_id = ?`,
-        [
-          normalizeText(req.body.projectName), newStatus, normalizeText(req.body.pillars), normalizeText(req.body.sites),
-          normalizeText(req.body.currentPmoGate), normalizeText(req.body.dtitInvolved), normalizeText(req.body.aiAaAType),
-          normalizeText(req.body.foakNoak), 
-          targetG1Date, targetG2Date, targetG3Date, targetClosedDate,
-          projectId
-        ], req
-      );
+      await queryPromise(`
+        UPDATE ${MANAGER_PROJECTS_TABLE} SET project_name = ?, project_status = ?, pillar = ?, site = ?, current_pmo_gate = ?, dtit_involved = ?, ai_type = ?, foak_noak = ?, target_g1_date = ?, target_g2_date = ?, target_g3_date = ?, target_closed_date = ?
+        WHERE project_id = ?
+      `, [normalizeText(req.body.projectName), newStatus, normalizeText(req.body.pillars), normalizeText(req.body.sites), normalizeText(req.body.currentPmoGate), normalizeText(req.body.dtitInvolved), normalizeText(req.body.aiAaAType), normalizeText(req.body.foakNoak), targetG1Date, targetG2Date, targetG3Date, targetClosedDate, projectId], req);
 
-      // --- NEW: Automate Actual Phase Tracking in the Ledger Table ---
       const curr = currentState.length > 0 ? currentState[0] : null;
       const oldStatus = curr ? curr.project_status : null;
 
-      // If the status has actually changed, close the old phase and open a new one
       if (oldStatus !== newStatus && newStatus) {
-        // 1. Close any currently open phase for this project
-        await bemQueryPromise(
-          `UPDATE ${MANAGER_PHASES_TABLE} SET end_date = CURDATE() WHERE project_id = ? AND end_date IS NULL`,
-          [projectId], req
-        );
-        // 2. Open the new phase
-        await bemQueryPromise(
-          `INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`,
-          [projectId, newStatus], req
-        );
+        await queryPromise(`UPDATE ${MANAGER_PHASES_TABLE} SET end_date = CURDATE() WHERE project_id = ? AND end_date IS NULL`, [projectId], req);
+        await queryPromise(`INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`, [projectId, newStatus], req);
       }
     }
 
-    // --- 2. Update Yearly Savings safely ---
     const yearKeys = Object.keys(req.body).filter(k => k.startsWith('year') && k.length === 8);
     for (const key of yearKeys) {
       const year = parseInt(key.replace('year', ''), 10);
       const val = normalizeNumber(req.body[key]);
-
       if (val !== null) {
-        const existingYear = await bemQueryPromise(
-          `SELECT project_id FROM ${MANAGER_YEARLY_TABLE} WHERE project_id = ? AND savings_year = ? LIMIT 1`,
-          [projectId, year], req
-        );
+        const existingYear = await queryPromise(`SELECT project_id FROM ${MANAGER_YEARLY_TABLE} WHERE project_id = ? AND savings_year = ? LIMIT 1`, [projectId, year], req);
         if (existingYear.length > 0) {
-          await bemQueryPromise(
-            `UPDATE ${MANAGER_YEARLY_TABLE} SET savings_value = ? WHERE project_id = ? AND savings_year = ?`,
-            [val, projectId, year], req
-          );
+          await queryPromise(`UPDATE ${MANAGER_YEARLY_TABLE} SET savings_value = ? WHERE project_id = ? AND savings_year = ?`, [val, projectId, year], req);
         } else {
-          await bemQueryPromise(
-            `INSERT INTO ${MANAGER_YEARLY_TABLE} (project_id, savings_year, savings_value) VALUES (?, ?, ?)`,
-            [projectId, year, val], req
-          );
+          await queryPromise(`INSERT INTO ${MANAGER_YEARLY_TABLE} (project_id, savings_year, savings_value) VALUES (?, ?, ?)`, [projectId, year, val], req);
         }
       }
     }
 
-    // --- 3. Update Metrics (KPIs) ---
-    const existingMetric = await bemQueryPromise(
-      `SELECT metrics_id FROM ${MANAGER_METRICS_TABLE} WHERE project_id = ? AND reporting_year = ? LIMIT 1`,
-      [projectId, currentYear], req
-    );
-
+    const existingMetric = await queryPromise(`SELECT metrics_id FROM ${MANAGER_METRICS_TABLE} WHERE project_id = ? AND reporting_year = ? LIMIT 1`, [projectId, currentYear], req);
     if (existingMetric.length > 0) {
-      await bemQueryPromise(
-        `UPDATE ${MANAGER_METRICS_TABLE} SET 
-         capacity_gain_value=?, capacity_gain_pct=?, dl_value=?, dl_equivalent=?, 
-         idl_value=?, idl_fte=?, yield_value=?, yield_gain_pct=?, quality_value=?, quality_cases=? 
-         WHERE metrics_id=?`,
-        [
-          normalizeNumber(req.body.capacityGainValue), normalizeNumber(req.body.capacityGainPercent),
-          normalizeNumber(req.body.dlValue), normalizeNumber(req.body.dlEquivalent),
-          normalizeNumber(req.body.idlValue), normalizeNumber(req.body.idlFte),
-          normalizeNumber(req.body.yieldValue), normalizeNumber(req.body.yieldPercentGain),
-          normalizeNumber(req.body.qualityValue), normalizeNumber(req.body.qualityCases),
-          existingMetric[0].metrics_id
-        ], req
-      );
+      await queryPromise(`UPDATE ${MANAGER_METRICS_TABLE} SET capacity_gain_value=?, capacity_gain_pct=?, dl_value=?, dl_equivalent=?, idl_value=?, idl_fte=?, yield_value=?, yield_gain_pct=?, quality_value=?, quality_cases=? WHERE metrics_id=?`, [normalizeNumber(req.body.capacityGainValue), normalizeNumber(req.body.capacityGainPercent), normalizeNumber(req.body.dlValue), normalizeNumber(req.body.dlEquivalent), normalizeNumber(req.body.idlValue), normalizeNumber(req.body.idlFte), normalizeNumber(req.body.yieldValue), normalizeNumber(req.body.yieldPercentGain), normalizeNumber(req.body.qualityValue), normalizeNumber(req.body.qualityCases), existingMetric[0].metrics_id], req);
     } else {
-      await bemQueryPromise(
-        `INSERT INTO ${MANAGER_METRICS_TABLE} 
-         (project_id, reporting_year, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent, idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          projectId, currentYear,
-          normalizeNumber(req.body.capacityGainValue), normalizeNumber(req.body.capacityGainPercent),
-          normalizeNumber(req.body.dlValue), normalizeNumber(req.body.dlEquivalent),
-          normalizeNumber(req.body.idlValue), normalizeNumber(req.body.idlFte),
-          normalizeNumber(req.body.yieldValue), normalizeNumber(req.body.yieldPercentGain),
-          normalizeNumber(req.body.qualityValue), normalizeNumber(req.body.qualityCases)
-        ], req
-      );
+      await queryPromise(`INSERT INTO ${MANAGER_METRICS_TABLE} (project_id, reporting_year, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent, idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [projectId, currentYear, normalizeNumber(req.body.capacityGainValue), normalizeNumber(req.body.capacityGainPercent), normalizeNumber(req.body.dlValue), normalizeNumber(req.body.dlEquivalent), normalizeNumber(req.body.idlValue), normalizeNumber(req.body.idlFte), normalizeNumber(req.body.yieldValue), normalizeNumber(req.body.yieldPercentGain), normalizeNumber(req.body.qualityValue), normalizeNumber(req.body.qualityCases)], req);
     }
 
-    // --- 4. Update Comments ---
     const commentText = normalizeText(req.body.comment);
     if (commentText !== null) {
-      const existingComment = await bemQueryPromise(`SELECT comment_id FROM ${MANAGER_COMMENTS_TABLE} WHERE project_id = ? ORDER BY created_at DESC LIMIT 1`, [projectId], req);
-      
+      const existingComment = await queryPromise(`SELECT comment_id FROM ${MANAGER_COMMENTS_TABLE} WHERE project_id = ? ORDER BY created_at DESC LIMIT 1`, [projectId], req);
       if (existingComment.length > 0) {
-         await bemQueryPromise(`UPDATE ${MANAGER_COMMENTS_TABLE} SET comment_text = ? WHERE comment_id = ?`, [commentText, existingComment[0].comment_id], req);
+         await queryPromise(`UPDATE ${MANAGER_COMMENTS_TABLE} SET comment_text = ? WHERE comment_id = ?`, [commentText, existingComment[0].comment_id], req);
       } else {
-         await bemQueryPromise(`INSERT INTO ${MANAGER_COMMENTS_TABLE} (project_id, comment_text) VALUES (?, ?)`, [projectId, commentText], req);
+         await queryPromise(`INSERT INTO ${MANAGER_COMMENTS_TABLE} (project_id, comment_text) VALUES (?, ?)`, [projectId, commentText], req);
       }
     }
 
@@ -2013,9 +616,6 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireAdmin, async
   }
 });
 
-// =====================================
-// Start server
-// =====================================
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
