@@ -37,7 +37,7 @@ const CONFIG_TABLE = 't_app_config';
 const app = express();
 
 app.use(cors({
-  origin: ['http://localhost:8080', 'http://localhost:8081',"http://muasxv4005.mua.st.com:9090"],
+  origin: ['http://localhost:8080','http://muasxv4005.mua.st.com:9090' ],
   credentials: true
 }));
 
