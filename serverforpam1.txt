@@ -37,7 +37,7 @@ const CONFIG_TABLE = 't_app_config';
 const app = express();
 
 app.use(cors({
-  origin: ['http://localhost:8080','http://muasxv4005.mua.st.com:9090' ],
+  origin: ['http://localhost:8080','http://muasxv4005.mua.st.com:9090', 'http://172.18.153.227:8080','http://172.18.165.43:8080' ],
   credentials: true
 }));
 
@@ -254,20 +254,16 @@ app.post('/api/login', (req, res) => {
           return res.status(401).json({ success: false, message: 'Invalid username or password.' });
         }
 
-        // --- NEW: Default to pending ---
         let access_right = 'pending';
         try {
           const results = await queryPromise(`SELECT access_right FROM ${ACCESS_TABLE} WHERE username = ?`, [username], req);
-          console.log("LOGIN DB CHECK FOR:", username, "RESULTS:", results);
           
           if (results.length > 0) {
             access_right = results[0].access_right || 'pending';
           } else {
-            // Auto-insert them so the Admin can see them in the config page
             await queryPromise(`INSERT INTO ${ACCESS_TABLE} (username, access_right, granted_by) VALUES (?, 'pending', 'system')`, [username], req);
           }
         } catch (dbErr) {
-          console.error("🔥🔥🔥 DATABASE ERROR IN LOGIN:", dbErr);
           traceError(trace, dbErr, { step: 'load_access_right', username });
         }
 
@@ -284,7 +280,6 @@ app.post('/api/login', (req, res) => {
 app.get('/api/check-auth', authenticateToken, (req, res) => {
   res.json({ loggedIn: true, user: req.user });
 });
-
 
 // =====================================
 // USER ACCESS MANAGEMENT (Admin Only)
@@ -320,7 +315,6 @@ app.put('/api/admin/users/:username', authenticateToken, requireAdmin, async (re
   }
 });
 
-
 // =====================================
 // MASTER DATA (Config/Dropdowns)
 // =====================================
@@ -348,11 +342,9 @@ app.post('/api/config/options', authenticateToken, requireAdmin, async (req, res
   }
 });
 
-
 // =====================================
 // BEM PROJECT DATA (Manager Yearly)
 // =====================================
-
 app.get('/api/manager-yearly', authenticateToken, requireAccess, async (req, res) => {
   const trace = traceStart('GET /api/manager-yearly', req);
   try {
@@ -389,7 +381,6 @@ app.get('/api/manager-yearly', authenticateToken, requireAccess, async (req, res
         projectStatus: proj.project_status || null,
         pillars: proj.pillar,
         sites: proj.site,
-        currentPmoGate: proj.current_pmo_gate,
         dtitInvolved: proj.dtit_involved,
         aiAaAType: proj.ai_type,
         foakNoak: proj.foak_noak,
@@ -500,7 +491,6 @@ app.post('/api/manager-yearly', authenticateToken, requireEditAccess, async (req
       project_status: normalizeText(req.body.projectStatus),
       pillars: normalizeText(req.body.pillars),
       sites: normalizeText(req.body.sites),
-      current_pmo_gate: normalizeText(req.body.currentPmoGate),
       dtit_involved: normalizeText(req.body.dtitInvolved),
       ai_aa_a_type: normalizeText(req.body.aiAaAType),
       foak_noak: normalizeText(req.body.foakNoak),
@@ -513,9 +503,9 @@ app.post('/api/manager-yearly', authenticateToken, requireEditAccess, async (req
     if (!payload.project_id || !payload.project_name) return res.status(400).json({ message: 'Project ID and Project Name are required.' });
 
     await queryPromise(`
-      INSERT INTO ${MANAGER_PROJECTS_TABLE} (project_id, project_name, project_status, pillar, site, current_pmo_gate, dtit_involved, ai_type, foak_noak, target_g1_date, target_g2_date, target_g3_date, target_closed_date)
+      INSERT INTO ${MANAGER_PROJECTS_TABLE} (project_id, project_name, project_status, pillar, site, dtit_involved, ai_type, foak_noak, target_g1_date, target_g2_date, target_g3_date, target_closed_date)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [payload.project_id, payload.project_name, payload.project_status, payload.pillars, payload.sites, payload.current_pmo_gate, payload.dtit_involved, payload.ai_aa_a_type, payload.foak_noak, payload.target_g1_date, payload.target_g2_date, payload.target_g3_date, payload.target_closed_date], req);
+    `, [payload.project_id, payload.project_name, payload.project_status, payload.pillars, payload.sites, payload.dtit_involved, payload.ai_aa_a_type, payload.foak_noak, payload.target_g1_date, payload.target_g2_date, payload.target_g3_date, payload.target_closed_date], req);
 
     if (payload.project_status) {
       await queryPromise(`INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`, [payload.project_id, payload.project_status], req);
@@ -534,9 +524,42 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireEditAccess, 
   const trace = traceStart('PUT /api/manager-yearly/:projectId', req, { projectId: req.params.projectId });
 
   try {
-    const projectId = req.params.projectId;
+    let projectId = req.params.projectId;
     const currentUser = getCurrentUser(req);
     const currentYear = new Date().getFullYear();
+
+    // ===============================================
+    // NEW: ADMIN PROJECT ID UPDATE LOGIC
+    // ===============================================
+    const newProjectId = normalizeText(req.body.newProjectId);
+    if (newProjectId && newProjectId !== projectId) {
+      // 1. Ensure user is an admin
+      if (req.user?.access_right !== 'admin') {
+        return res.status(403).json({ message: 'Forbidden: Only Admins can modify the Project ID.' });
+      }
+
+      // 2. Check if the new ID is already taken
+      const existingProject = await queryPromise(`SELECT project_id FROM ${MANAGER_PROJECTS_TABLE} WHERE project_id = ?`, [newProjectId], req);
+      if (existingProject.length > 0) {
+        return res.status(409).json({ message: `The Project ID '${newProjectId}' is already in use by another project.` });
+      }
+
+      // 3. Temporarily disable foreign key checks to safely migrate the ID across all tables
+      await queryPromise('SET FOREIGN_KEY_CHECKS=0;', [], req);
+      
+      await queryPromise(`UPDATE ${MANAGER_PROJECTS_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
+      await queryPromise(`UPDATE ${MANAGER_YEARLY_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
+      await queryPromise(`UPDATE ${MANAGER_METRICS_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
+      await queryPromise(`UPDATE ${MANAGER_COMMENTS_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
+      await queryPromise(`UPDATE ${MANAGER_HISTORY_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
+      await queryPromise(`UPDATE ${MANAGER_PHASES_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
+      
+      await queryPromise('SET FOREIGN_KEY_CHECKS=1;', [], req);
+
+      // 4. Override the local variable so the rest of the standard updates save to the new ID
+      projectId = newProjectId;
+    }
+    // ===============================================
 
     const targetG1Date = parseStandardDate(req.body.targetG1Date);
     const targetG2Date = parseStandardDate(req.body.targetG2Date);
@@ -564,7 +587,7 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireEditAccess, 
       const newStatus = normalizeText(req.body.projectStatus);
       
       await queryPromise(`
-        UPDATE ${MANAGER_PROJECTS_TABLE} SET project_name = ?, project_status = ?, pillar = ?, site = ?, current_pmo_gate = ?, dtit_involved = ?, ai_type = ?, foak_noak = ?, target_g1_date = ?, target_g2_date = ?, target_g3_date = ?, target_closed_date = ?
+        UPDATE ${MANAGER_PROJECTS_TABLE} SET project_name = ?, project_status = ?, pillar = ?, site = ?, dtit_involved = ?, ai_type = ?, foak_noak = ?, target_g1_date = ?, target_g2_date = ?, target_g3_date = ?, target_closed_date = ?
         WHERE project_id = ?
       `, [normalizeText(req.body.projectName), newStatus, normalizeText(req.body.pillars), normalizeText(req.body.sites), normalizeText(req.body.currentPmoGate), normalizeText(req.body.dtitInvolved), normalizeText(req.body.aiAaAType), normalizeText(req.body.foakNoak), targetG1Date, targetG2Date, targetG3Date, targetClosedDate, projectId], req);
 
