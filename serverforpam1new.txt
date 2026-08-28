@@ -471,7 +471,7 @@ app.get('/api/manager-yearly/history/all', authenticateToken, requireAdmin, asyn
 app.get('/api/manager-yearly/:projectId/history', authenticateToken, requireAccess, async (req, res) => {
   try {
     const rows = await queryPromise(`
-      SELECT history_id, project_id, project_name, project_status, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent,
+      SELECT history_id, project_id, project_name, project_status, current_pmo_gate, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent,
              idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases, comment_text, changed_by, DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at, action_type
       FROM ${MANAGER_HISTORY_TABLE} WHERE project_id = ? ORDER BY changed_at DESC
     `, [req.params.projectId], req);
@@ -510,8 +510,8 @@ app.post('/api/manager-yearly', authenticateToken, requireEditAccess, async (req
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [payload.project_id, payload.project_name, payload.project_status, payload.pillars, payload.sites, payload.current_pmo_gate, payload.dtit_involved, payload.ai_aa_a_type, payload.foak_noak, payload.target_g1_date, payload.target_g2_date, payload.target_g3_date, payload.target_closed_date], req);
 
-    if (payload.project_status) {
-      await queryPromise(`INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`, [payload.project_id, payload.project_status], req);
+    if (payload.current_pmo_gate) {
+      await queryPromise(`INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`, [payload.project_id, payload.current_pmo_gate], req);
     }
 
     traceEnd(trace, { outcome: 'success', project_id: payload.project_id });
@@ -594,12 +594,15 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireEditAccess, 
         WHERE project_id = ?
       `, [normalizeText(req.body.projectName), newStatus, normalizeText(req.body.pillars), normalizeText(req.body.sites), normalizeText(req.body.currentPmoGate), normalizeText(req.body.dtitInvolved), normalizeText(req.body.aiAaAType), normalizeText(req.body.foakNoak), targetG1Date, targetG2Date, targetG3Date, targetClosedDate, projectId], req);
 
+      const newGate = normalizeText(req.body.currentPmoGate);
       const curr = currentState.length > 0 ? currentState[0] : null;
-      const oldStatus = curr ? curr.project_status : null;
+      const oldGate = curr ? curr.current_pmo_gate : null;
 
-      if (oldStatus !== newStatus && newStatus) {
+      if (oldGate !== newGate && newGate) {
+        // Close out the old phase
         await queryPromise(`UPDATE ${MANAGER_PHASES_TABLE} SET end_date = CURDATE() WHERE project_id = ? AND end_date IS NULL`, [projectId], req);
-        await queryPromise(`INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`, [projectId, newStatus], req);
+        // Start the new PMO Gate phase
+        await queryPromise(`INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`, [projectId, newGate], req);
       }
     }
 
@@ -701,12 +704,21 @@ app.get('/api/admin/force-snapshot', authenticateToken, requireAdmin, async (req
   try {
     const snapshotSql = `
       INSERT INTO t_manager_monthly_snapshots 
-        (snapshot_month, project_id, project_name, current_pmo_gate, project_status, 
-         capacity_gain_value, dl_value, idl_value, yield_value, quality_value)
+        (snapshot_month, current_pmo_gate, total_projects, 
+         total_capacity_gain_value, total_capacity_gain_pct, 
+         total_dl_value, total_dl_equivalent, 
+         total_idl_value, total_idl_fte, 
+         total_yield_value, total_yield_gain_pct, 
+         total_quality_value, total_quality_cases)
       SELECT 
         DATE_FORMAT(CURRENT_DATE, '%Y-%m'), 
-        p.project_id, p.project_name, p.current_pmo_gate, p.project_status,
-        m.capacity_gain_value, m.dl_value, m.idl_value, m.yield_value, m.quality_value
+        IFNULL(p.current_pmo_gate, 'Unassigned'),
+        COUNT(p.project_id),
+        SUM(m.capacity_gain_value), SUM(m.capacity_gain_pct),
+        SUM(m.dl_value), SUM(m.dl_equivalent),
+        SUM(m.idl_value), SUM(m.idl_fte),
+        SUM(m.yield_value), SUM(m.yield_gain_pct),
+        SUM(m.quality_value), SUM(m.quality_cases)
       FROM ${MANAGER_PROJECTS_TABLE} p
       LEFT JOIN (
         SELECT m1.* FROM ${MANAGER_METRICS_TABLE} m1
@@ -715,7 +727,8 @@ app.get('/api/admin/force-snapshot', authenticateToken, requireAdmin, async (req
             FROM ${MANAGER_METRICS_TABLE} 
             GROUP BY project_id
         ) latest ON m1.project_id = latest.project_id AND m1.reporting_year = latest.max_year
-      ) m ON p.project_id = m.project_id;
+      ) m ON p.project_id = m.project_id
+      GROUP BY p.current_pmo_gate;
     `;
 
     await queryPromise(snapshotSql, [], req);
