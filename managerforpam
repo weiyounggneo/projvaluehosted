@@ -157,14 +157,66 @@
         </div>
       </div>
 
+      <!-- ACTION BUTTONS (Moved above the table) -->
+      <div class="actions" style="margin: 0 20px 16px 20px; background: white; padding: 16px 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05); border: 1px solid #e0e6ed; justify-content: flex-start;">
+        <!-- HIDE ADD/UPDATE FROM VIEWERS -->
+        <button v-if="isEditor" class="primary-btn" @click="openAddForm" :disabled="isProcessing || isPageLoading">Add</button>
+        <button v-if="isEditor" class="primary-btn" @click="openUpdateForm" :disabled="isProcessing || isPageLoading || !selectedRow">
+          Update
+        </button>
+
+        <div v-if="isEditor" class="divider"></div>
+        <button class="view-btn" @click="openHistoryModal" :disabled="isProcessing || isPageLoading || !selectedRow">
+          View History
+        </button>
+        <button class="view-btn" v-if="isAdmin" @click="openGlobalHistoryModal" :disabled="isProcessing || isPageLoading">
+          Global Audit Log
+        </button>
+
+        <div class="divider"></div>
+        <button @click="setFinancialView" :disabled="isProcessing || isPageLoading" class="view-btn">
+          Financial View
+        </button>
+        <button @click="setTimelineView" :disabled="isProcessing || isPageLoading" class="view-btn">
+          Timeline View
+        </button>
+        <button @click="setGlobalView" :disabled="isProcessing || isPageLoading" class="view-btn">
+          Global View
+        </button>
+        <button @click="showColumnManager = true" :disabled="isProcessing || isPageLoading" class="view-btn">
+          Custom Columns
+        </button>
+      </div>
+
       <!-- INLINE FILTERS BAR -->
       <div class="filters-bar">
-        <div class="filter-group">
-          <label>Filter by Project Name:</label>
-          <select v-model="filters.projectName">
-            <option value="">-- All Projects --</option>
-            <option v-for="name in uniqueProjectNames" :key="name" :value="name">{{ name }}</option>
-          </select>
+        
+        <!-- SEARCHABLE DROPDOWN WITH AUTO-OPEN & ALIGNMENT -->
+        <div class="filter-group custom-dropdown-wrapper">
+          <label>Search Project Name:</label>
+          <input 
+            type="text" 
+            v-model="filters.projectName" 
+            placeholder="Type or select a project..." 
+            @focus="showProjectDropdown = true"
+            @input="showProjectDropdown = true"
+            @blur="closeProjectDropdown"
+            class="filter-input"
+          />
+          
+          <!-- Dropdown popup menu -->
+          <ul 
+            v-if="showProjectDropdown && filteredProjectNames.length > 0" 
+            class="custom-dropdown-menu"
+          >
+            <li 
+              v-for="name in filteredProjectNames" 
+              :key="name"
+              @mousedown.prevent="selectProject(name)"
+            >
+              {{ name }}
+            </li>
+          </ul>
         </div>
 
         <div class="filter-group">
@@ -175,17 +227,20 @@
           </select>
         </div>
 
+        <!-- SITE FILTER & CLEAR BUTTON GROUPED TOGETHER -->
         <div class="filter-group">
           <label>Filter by Site:</label>
-          <select v-model="filters.site">
-            <option value="">-- All Sites --</option>
-            <option v-for="site in uniqueSites" :key="site" :value="site">{{ site }}</option>
-          </select>
+          <div style="display: flex; gap: 8px;">
+            <select v-model="filters.site" style="flex: 1;">
+              <option value="">-- All Sites --</option>
+              <option v-for="site in uniqueSites" :key="site" :value="site">{{ site }}</option>
+            </select>
+            <button class="cancel" style="padding: 8px 16px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; color: white;" @click="clearFilters">
+              Clear Filters
+            </button>
+          </div>
         </div>
 
-        <button class="actions cancel" style="margin-top: 0; margin-bottom: 2px;" @click="clearFilters">
-          Clear Filters
-        </button>
       </div>
 
       <div class="table-section">
@@ -273,40 +328,6 @@
             </template>
           </vue-good-table>
         </div>
-      </div>
-
-      <!-- ACTION BUTTONS -->
-      <div class="actions">
-        <!-- HIDE ADD/UPDATE FROM VIEWERS -->
-        <button v-if="isEditor" class="primary-btn" @click="openAddForm" :disabled="isProcessing || isPageLoading">Add</button>
-        <button v-if="isEditor" class="primary-btn" @click="openUpdateForm" :disabled="isProcessing || isPageLoading || !selectedRow">
-          Update
-        </button>
-
-        <div v-if="isEditor" class="divider"></div>
-        <button class="view-btn" @click="openHistoryModal" :disabled="isProcessing || isPageLoading || !selectedRow">
-          View History
-        </button>
-        <button class="view-btn" v-if="isAdmin" @click="openGlobalHistoryModal" :disabled="isProcessing || isPageLoading">
-          Global Audit Log
-        </button>
-
-        <div class="divider"></div>
-        <button @click="setFinancialView" :disabled="isProcessing || isPageLoading" class="view-btn">
-          Financial View
-        </button>
-        <button @click="setTimelineView" :disabled="isProcessing || isPageLoading" class="view-btn">
-          Timeline View
-        </button>
-        <button @click="setGlobalView" :disabled="isProcessing || isPageLoading" class="view-btn">
-          Global View
-        </button>
-        <button @click="showColumnManager = true" :disabled="isProcessing || isPageLoading" class="view-btn">
-          Custom Columns
-        </button>
-
-        <div class="divider"></div>
-        <button @click="clearTableUI" :disabled="isProcessing || isPageLoading">Clear Selection</button>
       </div>
 
       <!-- SELECTED ROW INFO PANEL -->
@@ -799,7 +820,10 @@
 
             <div class="form-group">
               <label for="currentPmoGate">Current PMO Gate</label>
-              <input id="currentPmoGate" type="text" v-model="activeForm.currentPmoGate" :disabled="isProcessing" />
+              <select id="currentPmoGate" v-model="activeForm.currentPmoGate" :disabled="isProcessing">
+                <option value="">(Blank)</option>
+                <option v-for="gate in configOptions.PMOGATE" :key="gate" :value="gate">{{ gate }}</option>
+              </select>
             </div>
 
             <div class="form-group">
@@ -840,16 +864,16 @@
                 :disabled="isProcessing"
               />
             </div>
+            
+            <div class="form-group full-width">
+              <label for="comment">Comment</label>
+              <input id="comment" type="text" v-model="activeForm.comment" :disabled="isProcessing" />
+            </div>
           </div>
 
           <!-- SECTION 3: KPIs -->
           <h4 class="section-heading">3. Key Performance Indicators</h4>
           <div class="form-grid">
-            <div class="form-group full-width">
-              <label for="comment">Comment</label>
-              <input id="comment" type="text" v-model="activeForm.comment" :disabled="isProcessing" />
-            </div>
-
             <div class="form-group">
               <label for="capacityGainValue">Capacity Gain Value</label>
               <input id="capacityGainValue" type="number" step="any" v-model="activeForm.capacityGainValue" :disabled="isProcessing" />
@@ -1154,7 +1178,8 @@ export default {
       configOptions: {
         SITE: [],
         PILLAR: [],
-        STATUS: [],
+        STATUS: ['Ongoing', 'Cancelled', 'Closed', 'On-Hold'],
+        PMOGATE: ['G1', 'G2', 'G2.5', 'G3', 'Closure'],
         DTIT: ['Yes', 'No'],
         AITYPE: ['AI', 'AA', 'A'],
         FOAKNOAK: ['FOAK', 'NOAK']
@@ -1188,6 +1213,9 @@ export default {
       processingMessage: '',
       showSuccessDialog: false,
       successMessage: '',
+
+      // Dropdown UI state
+      showProjectDropdown: false,
 
       // UI State
       showAddForm: false,
@@ -1292,6 +1320,15 @@ export default {
     uniqueProjectNames() {
       return [...new Set(this.rows.map(r => r.projectName).filter(Boolean))].sort();
     },
+    filteredProjectNames() {
+      const query = (this.filters.projectName || '').toLowerCase().trim();
+      if (!query) {
+        return this.uniqueProjectNames;
+      }
+      return this.uniqueProjectNames.filter(name =>
+        name.toLowerCase().includes(query)
+      );
+    },
     uniquePillars() {
       return [...new Set(this.rows.map(r => r.pillars).filter(Boolean))].sort();
     },
@@ -1309,7 +1346,9 @@ export default {
     },
     filteredRows() {
       return this.rows.filter(row => {
-        const matchName = !this.filters.projectName || row.projectName === this.filters.projectName;
+        const matchName = !this.filters.projectName || 
+          (row.projectName && row.projectName.toLowerCase().includes(this.filters.projectName.toLowerCase()));
+          
         const matchPillar = !this.filters.pillar || row.pillars === this.filters.pillar;
         
         let matchSite = true;
@@ -1637,7 +1676,7 @@ export default {
         },
         yaxis: { labels: { style: { fontSize: '13px', fontWeight: 600 } } },
         legend: { position: 'top', horizontalAlign: 'left' },
-        tooltip: { x: { format: 'dd MMM yyyy' } },
+        tooltip: { x: { format: 'MM-yyyy' } },
         noData: { text: 'No timeline data available for selected filters.' }
       };
     },
@@ -1688,6 +1727,20 @@ export default {
   },
   methods: {
     // -------------------------------------------------
+    // DROPDOWN METHODS
+    // -------------------------------------------------
+    selectProject(name) {
+      this.filters.projectName = name;
+      this.showProjectDropdown = false;
+    },
+    closeProjectDropdown() {
+      // Small timeout allows click events on list items to register first
+      setTimeout(() => {
+        this.showProjectDropdown = false;
+      }, 150);
+    },
+
+    // -------------------------------------------------
     // NEW: FETCH MASTER DATA OPTIONS
     // -------------------------------------------------
     async fetchConfigOptions() {
@@ -1695,20 +1748,21 @@ export default {
         const response = await this.apiFetch(`${process.env.VUE_APP_API_URL}/api/config/options`);
         if (response.ok) {
           const data = await response.json();
-          // Assign data from DB, but map fallbacks just in case the DB is empty
+          // Map the exact database category names (e.g. data.SITE) to the Vue state
           this.configOptions.SITE = data.SITE || ['BSK', 'CAL', 'CLB', 'KIR', 'MAL', 'MUA', 'STS'];
           this.configOptions.PILLAR = data.PILLAR || ['Process & Equipment Intelligence', 'Smart Decision Hub', 'Vision Intelligence'];
-          this.configOptions.STATUS = data.STATUS || ['Ongoing', 'Closed', 'G1', 'G2', 'G3'];
-          this.configOptions.DTIT = data.DTIT || ['Yes', 'No'];
-          this.configOptions.AITYPE = data.AITYPE || ['AI', 'AA', 'A'];
-          this.configOptions.FOAKNOAK = data.FOAKNOAK || ['FOAK', 'NOAK'];
+          this.configOptions.STATUS = data.PROJECT_STATUS || ['Ongoing', 'Cancelled', 'Closed', 'On-Hold'];
+          this.configOptions.PMOGATE = data.PMOGATE || ['G1', 'G2', 'G2.5', 'G3', 'Closure'];
+          this.configOptions.DTIT = data.DTIT_INVOLVED || ['Yes', 'No'];
+          this.configOptions.AITYPE = data.AI_AA_A_TYPE || ['AI', 'AA', 'A'];
+          this.configOptions.FOAKNOAK = data.FOAK_NOAK || ['FOAK', 'NOAK'];
         }
       } catch (err) {
         console.error("Failed to load config options. Using safe default fallbacks.", err);
-        // Defaults to keep the app running if network fails
         this.configOptions.SITE = ['BSK', 'CAL', 'CLB', 'KIR', 'MAL', 'MUA', 'STS'];
         this.configOptions.PILLAR = ['Process & Equipment Intelligence', 'Smart Decision Hub', 'Vision Intelligence'];
-        this.configOptions.STATUS = ['Ongoing', 'Closed', 'G1', 'G2', 'G3'];
+        this.configOptions.STATUS = ['Ongoing', 'Cancelled', 'Closed', 'On-Hold'];
+        this.configOptions.PMOGATE = ['G1', 'G2', 'G2.5', 'G3', 'Closure'];
         this.configOptions.DTIT = ['Yes', 'No'];
         this.configOptions.AITYPE = ['AI', 'AA', 'A'];
         this.configOptions.FOAKNOAK = ['FOAK', 'NOAK'];
@@ -2166,7 +2220,15 @@ export default {
     },
     formatDate(val) {
       if (!val) return '-';
-      return String(val).slice(0, 10);
+      
+      const dateObj = new Date(val);
+      // Fallback if the date is invalid
+      if (isNaN(dateObj.getTime())) return String(val).slice(0, 10); 
+      
+      const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+      const yyyy = dateObj.getFullYear();
+      
+      return `${mm}-${yyyy}`;
     },
     getRagClass(actual, target) {
       if (!actual || !target) return 'pending-cell';
@@ -2434,7 +2496,7 @@ export default {
         projectStatus: '',
         pillars: '',
         sites: '', 
-        sitesArray: [], 
+        sitesArray: [],
         currentPmoGate: '',
         dtitInvolved: '',
         aiAaAType: '',
@@ -3023,11 +3085,61 @@ export default {
   color: #333;
 }
 
+/* Custom Searchable Dropdown Styling */
+.custom-dropdown-wrapper {
+  position: relative;
+}
+
+.filter-input {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  background-color: #fff;
+  box-sizing: border-box;
+}
+
+.custom-dropdown-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 1050;
+  background: #ffffff;
+  border: 1px solid #c2d5ee;
+  border-radius: 0 0 6px 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 2px 0 0 0;
+  padding: 0;
+  list-style: none;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.12);
+}
+
+.custom-dropdown-menu li {
+  padding: 8px 12px;
+  font-size: 0.9rem;
+  color: #333;
+  cursor: pointer;
+  border-bottom: 1px solid #f0f4f8;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.custom-dropdown-menu li:last-child {
+  border-bottom: none;
+}
+
+.custom-dropdown-menu li:hover {
+  background-color: #e7edf5;
+  color: #1f5fa8;
+  font-weight: 600;
+}
+
 /* Buttons inside the Tab */
 .actions {
   display: flex;
   gap: 12px;
-  margin: 16px 20px;
   flex-wrap: wrap;
   align-items: center;
 }
