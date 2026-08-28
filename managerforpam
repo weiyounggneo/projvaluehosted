@@ -624,7 +624,7 @@
               <thead style="position: sticky; top: 0; z-index: 10;">
                 <tr>
                   <th>Project Name</th>
-                  <th>Current Status</th>
+                  
                   <th>Target G1</th>
                   <th>Actual G1</th>
                   <th>Target G2</th>
@@ -638,7 +638,7 @@
               <tbody>
                 <tr v-for="item in filteredTimelineRows" :key="item.projectId">
                   <td><strong>{{ item.projectName }}</strong></td>
-                  <td><span class="badge">{{ item.projectStatus || '-' }}</span></td>
+                  <td><span class="badge">{{ item.currentPmoGate || '-' }}</span></td>
                   
                   <!-- Target G1 -->
                   <td>
@@ -995,6 +995,7 @@
                 <th>Changed By</th>
                 <th>Status (Action)</th>
                 <th>Proj. Status</th>
+                <th>PMO Gate</th>
                 <th>Comment</th>
                 <th>Cap. Gain Val</th>
                 <th>Cap. Gain %</th>
@@ -1033,6 +1034,7 @@
                   </div>
                 </td>
                 <td>{{ log.project_status || '-' }}</td>
+                <td>{{ log.current_pmo_gate || '-' }}</td>
                 <td>{{ log.comment_text }}</td>
                 <td>{{ formatCurrency(log.capacity_gain_value) }}</td>
                 <td>{{ formatPercent(log.capacity_gain_pct) }}</td>
@@ -1300,6 +1302,7 @@ export default {
         { label: 'Project ID', field: 'project_id', width: '100px' },
         { label: 'Project Name', field: 'project_name', width: '150px' },
         { label: 'Proj. Status', field: 'project_status', width: '110px' },
+        { label: 'PMO Gate', field: 'current_pmo_gate', width: '100px' },
         { label: 'Comment', field: 'comment_text', width: '200px' },
         { label: 'Cap. Gain Val', field: 'capacity_gain_value', formatFn: this.formatCurrency, width: '120px' },
         { label: 'Cap. Gain %', field: 'capacity_gain_pct', formatFn: this.formatPercent, width: '100px' },
@@ -1392,14 +1395,15 @@ export default {
         result.Overall.count += 1;
         result.Overall.value += projectValue;
 
-        const status = String(row.projectStatus || '').trim().toUpperCase();
-        if (status === 'G1') {
+        // NEW LOGIC: Target the PMO Gate instead of Project Status
+        const gate = String(row.currentPmoGate || '').trim().toUpperCase();
+        if (gate === 'G1') {
           result.G1.count += 1;
           result.G1.value += projectValue;
-        } else if (status === 'G2') {
+        } else if (gate === 'G2' || gate === 'G2.5') { // Included G2.5 in G2 bucket, adjust if needed
           result.G2.count += 1;
           result.G2.value += projectValue;
-        } else if (status === 'G3') {
+        } else if (gate === 'G3') {
           result.G3.count += 1;
           result.G3.value += projectValue;
         }
@@ -2278,6 +2282,7 @@ export default {
           action_type: 'CURRENT',
           project_name: this.selectedRow.projectName,
           project_status: this.selectedRow.projectStatus,
+          current_pmo_gate: this.selectedRow.currentPmoGate,
           capacity_gain_value: this.selectedRow.capacityGainValue,
           capacity_gain_pct: this.selectedRow.capacityGainPercent,
           dl_value: this.selectedRow.dlValue,
@@ -2325,6 +2330,7 @@ export default {
             project_id: row.projectId,
             project_name: row.projectName,
             project_status: row.projectStatus,
+            current_pmo_gate: row.currentPmoGate,
             capacity_gain_value: row.capacityGainValue,
             capacity_gain_pct: row.capacityGainPercent,
             dl_value: row.dlValue,
@@ -2374,6 +2380,7 @@ export default {
         const payload = {
           projectName: log.project_name,
           projectStatus: log.project_status,
+          currentPmoGate: log.current_pmo_gate,
           comment: log.comment_text || log.comments,
           capacityGainValue: log.capacity_gain_value,
           capacityGainPercent: log.capacity_gain_pct,
