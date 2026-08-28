@@ -6,6 +6,7 @@ const ldap = require('ldapjs');
 const mysql = require('mysql2');
 const path = require('path');
 const jwt = require('jsonwebtoken');
+const cron = require('node-cron'); // NEW: Required for automated tasks
 
 const {
   getTraceId,
@@ -381,6 +382,7 @@ app.get('/api/manager-yearly', authenticateToken, requireAccess, async (req, res
         projectStatus: proj.project_status || null,
         pillars: proj.pillar,
         sites: proj.site,
+        currentPmoGate: proj.current_pmo_gate,
         dtitInvolved: proj.dtit_involved,
         aiAaAType: proj.ai_type,
         foakNoak: proj.foak_noak,
@@ -456,7 +458,7 @@ app.get('/api/manager-site-targets', authenticateToken, requireAccess, async (re
 app.get('/api/manager-yearly/history/all', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const rows = await queryPromise(`
-      SELECT history_id, project_id, project_name, project_status, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent,
+      SELECT history_id, project_id, project_name, project_status,current_pmo_gate, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent,
              idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases, comment_text, changed_by, DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at, action_type
       FROM ${MANAGER_HISTORY_TABLE} ORDER BY changed_at DESC
     `, [], req);
@@ -491,6 +493,7 @@ app.post('/api/manager-yearly', authenticateToken, requireEditAccess, async (req
       project_status: normalizeText(req.body.projectStatus),
       pillars: normalizeText(req.body.pillars),
       sites: normalizeText(req.body.sites),
+      current_pmo_gate: normalizeText(req.body.currentPmoGate),
       dtit_involved: normalizeText(req.body.dtitInvolved),
       ai_aa_a_type: normalizeText(req.body.aiAaAType),
       foak_noak: normalizeText(req.body.foakNoak),
@@ -503,9 +506,9 @@ app.post('/api/manager-yearly', authenticateToken, requireEditAccess, async (req
     if (!payload.project_id || !payload.project_name) return res.status(400).json({ message: 'Project ID and Project Name are required.' });
 
     await queryPromise(`
-      INSERT INTO ${MANAGER_PROJECTS_TABLE} (project_id, project_name, project_status, pillar, site, dtit_involved, ai_type, foak_noak, target_g1_date, target_g2_date, target_g3_date, target_closed_date)
+      INSERT INTO ${MANAGER_PROJECTS_TABLE} (project_id, project_name, project_status, pillar, site, current_pmo_gate, dtit_involved, ai_type, foak_noak, target_g1_date, target_g2_date, target_g3_date, target_closed_date)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [payload.project_id, payload.project_name, payload.project_status, payload.pillars, payload.sites, payload.dtit_involved, payload.ai_aa_a_type, payload.foak_noak, payload.target_g1_date, payload.target_g2_date, payload.target_g3_date, payload.target_closed_date], req);
+    `, [payload.project_id, payload.project_name, payload.project_status, payload.pillars, payload.sites, payload.current_pmo_gate, payload.dtit_involved, payload.ai_aa_a_type, payload.foak_noak, payload.target_g1_date, payload.target_g2_date, payload.target_g3_date, payload.target_closed_date], req);
 
     if (payload.project_status) {
       await queryPromise(`INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`, [payload.project_id, payload.project_status], req);
@@ -567,7 +570,7 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireEditAccess, 
     const targetClosedDate = parseStandardDate(req.body.targetClosedDate);
 
     const currentState = await queryPromise(`
-      SELECT p.project_name, p.project_status, m.capacity_gain_value, m.capacity_gain_pct, m.dl_value, m.dl_equivalent, 
+      SELECT p.project_name, p.project_status,p.current_pmo_gate, m.capacity_gain_value, m.capacity_gain_pct, m.dl_value, m.dl_equivalent, 
              m.idl_value, m.idl_fte, m.yield_value, m.yield_gain_pct, m.quality_value, m.quality_cases, c.comment_text
       FROM ${MANAGER_PROJECTS_TABLE} p
       LEFT JOIN ${MANAGER_METRICS_TABLE} m ON p.project_id = m.project_id AND m.reporting_year = ?
@@ -578,16 +581,16 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireEditAccess, 
     if (currentState.length > 0) {
       const curr = currentState[0];
       await queryPromise(`
-        INSERT INTO ${MANAGER_HISTORY_TABLE} (project_id, project_name, project_status, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent, idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases, comment_text, changed_by, action_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPDATE')
-      `, [projectId, curr.project_name, curr.project_status, curr.capacity_gain_value, curr.capacity_gain_pct, curr.dl_value, curr.dl_equivalent, curr.idl_value, curr.idl_fte, curr.yield_value, curr.yield_gain_pct, curr.quality_value, curr.quality_cases, curr.comment_text, currentUser], req);
+        INSERT INTO ${MANAGER_HISTORY_TABLE} (project_id, project_name, project_status, current_pmo_gate, capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent, idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases, comment_text, changed_by, action_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPDATE')
+      `, [projectId, curr.project_name, curr.project_status, curr.current_pmo_gate, curr.capacity_gain_value, curr.capacity_gain_pct, curr.dl_value, curr.dl_equivalent, curr.idl_value, curr.idl_fte, curr.yield_value, curr.yield_gain_pct, curr.quality_value, curr.quality_cases, curr.comment_text, currentUser], req);
     }
 
     if (req.body.projectName) {
       const newStatus = normalizeText(req.body.projectStatus);
       
       await queryPromise(`
-        UPDATE ${MANAGER_PROJECTS_TABLE} SET project_name = ?, project_status = ?, pillar = ?, site = ?, dtit_involved = ?, ai_type = ?, foak_noak = ?, target_g1_date = ?, target_g2_date = ?, target_g3_date = ?, target_closed_date = ?
+        UPDATE ${MANAGER_PROJECTS_TABLE} SET project_name = ?, project_status = ?, pillar = ?, site = ?, current_pmo_gate = ?, dtit_involved = ?, ai_type = ?, foak_noak = ?, target_g1_date = ?, target_g2_date = ?, target_g3_date = ?, target_closed_date = ?
         WHERE project_id = ?
       `, [normalizeText(req.body.projectName), newStatus, normalizeText(req.body.pillars), normalizeText(req.body.sites), normalizeText(req.body.currentPmoGate), normalizeText(req.body.dtitInvolved), normalizeText(req.body.aiAaAType), normalizeText(req.body.foakNoak), targetG1Date, targetG2Date, targetG3Date, targetClosedDate, projectId], req);
 
@@ -638,6 +641,90 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireEditAccess, 
     return res.status(500).json({ message: err.message });
   }
 });
+
+
+// =====================================
+// AUTOMATED MONTHLY SNAPSHOTS
+// =====================================
+// Runs every night at 11:55 PM (23:55)
+cron.schedule('55 23 * * *', async () => {
+  const today = new Date();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+
+  if (today.getMonth() !== tomorrow.getMonth()) {
+    console.log('Last day of the month detected. Running aggregated KPI snapshot...');
+    
+    try {
+      const snapshotSql = `
+        INSERT INTO t_manager_monthly_snapshots 
+          (snapshot_month, current_pmo_gate, total_projects, 
+           total_capacity_gain_value, total_capacity_gain_pct, 
+           total_dl_value, total_dl_equivalent, 
+           total_idl_value, total_idl_fte, 
+           total_yield_value, total_yield_gain_pct, 
+           total_quality_value, total_quality_cases)
+        SELECT 
+          DATE_FORMAT(CURRENT_DATE, '%Y-%m'), 
+          IFNULL(p.current_pmo_gate, 'Unassigned'),
+          COUNT(p.project_id),
+          SUM(m.capacity_gain_value), SUM(m.capacity_gain_pct),
+          SUM(m.dl_value), SUM(m.dl_equivalent),
+          SUM(m.idl_value), SUM(m.idl_fte),
+          SUM(m.yield_value), SUM(m.yield_gain_pct),
+          SUM(m.quality_value), SUM(m.quality_cases)
+        FROM t_manager_project_master p
+        LEFT JOIN (
+          SELECT m1.* FROM t_manager_metrics m1
+          INNER JOIN (
+              SELECT project_id, MAX(reporting_year) as max_year 
+              FROM t_manager_metrics 
+              GROUP BY project_id
+          ) latest ON m1.project_id = latest.project_id AND m1.reporting_year = latest.max_year
+        ) m ON p.project_id = m.project_id
+        GROUP BY p.current_pmo_gate;
+      `;
+
+      const dummyReq = { headers: {} };
+      await queryPromise(snapshotSql, [], dummyReq);
+      console.log('Aggregated monthly snapshot captured successfully.');
+    } catch (err) {
+      console.error('Failed to capture monthly snapshot:', err);
+    }
+  }
+});
+
+// =====================================
+// MANUAL SNAPSHOT TRIGGER (ADMIN ONLY)
+// =====================================
+app.get('/api/admin/force-snapshot', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const snapshotSql = `
+      INSERT INTO t_manager_monthly_snapshots 
+        (snapshot_month, project_id, project_name, current_pmo_gate, project_status, 
+         capacity_gain_value, dl_value, idl_value, yield_value, quality_value)
+      SELECT 
+        DATE_FORMAT(CURRENT_DATE, '%Y-%m'), 
+        p.project_id, p.project_name, p.current_pmo_gate, p.project_status,
+        m.capacity_gain_value, m.dl_value, m.idl_value, m.yield_value, m.quality_value
+      FROM ${MANAGER_PROJECTS_TABLE} p
+      LEFT JOIN (
+        SELECT m1.* FROM ${MANAGER_METRICS_TABLE} m1
+        INNER JOIN (
+            SELECT project_id, MAX(reporting_year) as max_year 
+            FROM ${MANAGER_METRICS_TABLE} 
+            GROUP BY project_id
+        ) latest ON m1.project_id = latest.project_id AND m1.reporting_year = latest.max_year
+      ) m ON p.project_id = m.project_id;
+    `;
+
+    await queryPromise(snapshotSql, [], req);
+    res.json({ message: 'Manual snapshot forced successfully.' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
