@@ -6,7 +6,7 @@ const ldap = require('ldapjs');
 const mysql = require('mysql2');
 const path = require('path');
 const jwt = require('jsonwebtoken');
-const cron = require('node-cron'); // NEW: Required for automated tasks
+const cron = require('node-cron'); // Required for automated tasks
 
 const {
   getTraceId,
@@ -71,10 +71,10 @@ app.use((req, res, next) => {
 });
 
 // Serve frontend build
-app.use(express.static(path.join(__dirname, '../dist')));
+app.use(express.static(path.join(__dirname, 'dist')));
 
 app.get(/^\/(?!api).*/, (req, res) => {
-  res.sendFile(path.join(__dirname, '../dist/index.html'));
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
 // =====================================
@@ -172,7 +172,6 @@ function authenticateToken(req, res, next) {
   });
 }
 
-// Blocks 'pending' users from fetching data
 function requireAccess(req, res, next) {
   const role = req.user?.access_right;
   if (!['viewer', 'user', 'admin'].includes(role)) {
@@ -181,7 +180,6 @@ function requireAccess(req, res, next) {
   next();
 }
 
-// Blocks 'viewer' and 'pending' users from editing data
 function requireEditAccess(req, res, next) {
   const role = req.user?.access_right;
   if (!['user', 'admin'].includes(role)) {
@@ -190,7 +188,6 @@ function requireEditAccess(req, res, next) {
   next();
 }
 
-// Strictly for Admin operations
 function requireAdmin(req, res, next) {
   if (req.user?.access_right !== 'admin') {
     return res.status(403).json({ message: 'Forbidden: Admins only.' });
@@ -376,10 +373,8 @@ app.get('/api/manager-yearly', authenticateToken, requireAccess, async (req, res
       const projComment = comments.find(c => c.project_id === proj.project_id) || {};
       
       const g1 = phases.find(p => p.project_id === proj.project_id && p.phase_name === 'G1');
-      // Group G2.5 together with G2 for timeline mapping
       const g2 = phases.find(p => p.project_id === proj.project_id && (p.phase_name === 'G2' || p.phase_name === 'G2.5'));
       const g3 = phases.find(p => p.project_id === proj.project_id && p.phase_name === 'G3');
-      // Capture the new Closure phase
       const closure = phases.find(p => p.project_id === proj.project_id && p.phase_name === 'Closure');
 
       const payload = {
@@ -396,7 +391,6 @@ app.get('/api/manager-yearly', authenticateToken, requireAccess, async (req, res
         targetG2Date: proj.target_g2_date || null,
         targetG3Date: proj.target_g3_date || null,
         targetClosedDate: proj.target_closed_date || null,
-        // Map the dynamic actual dates
         actualG1Date: g1 ? g1.actual_start : null,
         actualG2Date: g2 ? g2.actual_start : null,
         actualG3Date: g3 ? g3.actual_start : null,
@@ -456,10 +450,46 @@ app.get('/api/manager-yearly/pipeline-velocity', authenticateToken, requireAcces
   }
 });
 
+// =====================================
+// SITE TARGETS ROUTES
+// =====================================
 app.get('/api/manager-site-targets', authenticateToken, requireAccess, async (req, res) => {
   try {
     const rows = await queryPromise(`SELECT * FROM ${MANAGER_SITE_TARGETS_TABLE}`, [], req);
     return res.json(rows);
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+});
+
+app.post('/api/manager-site-targets', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { site, target_year, expected_value } = req.body;
+    if (!site || !target_year || expected_value === undefined) {
+      return res.status(400).json({ message: 'Site, Target Year, and Expected Value are required.' });
+    }
+
+    const existing = await queryPromise(`SELECT * FROM ${MANAGER_SITE_TARGETS_TABLE} WHERE site = ? AND target_year = ?`, [site, target_year], req);
+    if (existing.length > 0) {
+      return res.status(409).json({ message: `A target already exists for ${site} in ${target_year}. Please update it instead.` });
+    }
+
+    await queryPromise(`INSERT INTO ${MANAGER_SITE_TARGETS_TABLE} (site, target_year, expected_value) VALUES (?, ?, ?)`, [site, target_year, expected_value], req);
+    return res.status(201).json({ message: 'Site target added successfully.' });
+  } catch (err) {
+    return res.status(500).json({ message: err.message });
+  }
+});
+
+app.put('/api/manager-site-targets', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { site, target_year, expected_value } = req.body;
+    if (!site || !target_year || expected_value === undefined) {
+      return res.status(400).json({ message: 'Site, Target Year, and Expected Value are required.' });
+    }
+
+    await queryPromise(`UPDATE ${MANAGER_SITE_TARGETS_TABLE} SET expected_value = ? WHERE site = ? AND target_year = ?`, [expected_value, site, target_year], req);
+    return res.json({ message: 'Site target updated successfully.' });
   } catch (err) {
     return res.status(500).json({ message: err.message });
   }
@@ -541,38 +571,28 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireEditAccess, 
     const currentUser = getCurrentUser(req);
     const currentYear = new Date().getFullYear();
 
-    // ===============================================
-    // NEW: ADMIN PROJECT ID UPDATE LOGIC
-    // ===============================================
     const newProjectId = normalizeText(req.body.newProjectId);
     if (newProjectId && newProjectId !== projectId) {
-      // 1. Ensure user is an admin
       if (req.user?.access_right !== 'admin') {
         return res.status(403).json({ message: 'Forbidden: Only Admins can modify the Project ID.' });
       }
 
-      // 2. Check if the new ID is already taken
       const existingProject = await queryPromise(`SELECT project_id FROM ${MANAGER_PROJECTS_TABLE} WHERE project_id = ?`, [newProjectId], req);
       if (existingProject.length > 0) {
         return res.status(409).json({ message: `The Project ID '${newProjectId}' is already in use by another project.` });
       }
 
-      // 3. Temporarily disable foreign key checks to safely migrate the ID across all tables
       await queryPromise('SET FOREIGN_KEY_CHECKS=0;', [], req);
-      
       await queryPromise(`UPDATE ${MANAGER_PROJECTS_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
       await queryPromise(`UPDATE ${MANAGER_YEARLY_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
       await queryPromise(`UPDATE ${MANAGER_METRICS_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
       await queryPromise(`UPDATE ${MANAGER_COMMENTS_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
       await queryPromise(`UPDATE ${MANAGER_HISTORY_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
       await queryPromise(`UPDATE ${MANAGER_PHASES_TABLE} SET project_id = ? WHERE project_id = ?`, [newProjectId, projectId], req);
-      
       await queryPromise('SET FOREIGN_KEY_CHECKS=1;', [], req);
 
-      // 4. Override the local variable so the rest of the standard updates save to the new ID
       projectId = newProjectId;
     }
-    // ===============================================
 
     const targetG1Date = parseStandardDate(req.body.targetG1Date);
     const targetG2Date = parseStandardDate(req.body.targetG2Date);
@@ -609,9 +629,7 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireEditAccess, 
       const oldGate = curr ? curr.current_pmo_gate : null;
 
       if (oldGate !== newGate && newGate) {
-        // Close out the old phase
         await queryPromise(`UPDATE ${MANAGER_PHASES_TABLE} SET end_date = CURDATE() WHERE project_id = ? AND end_date IS NULL`, [projectId], req);
-        // Start the new PMO Gate phase
         await queryPromise(`INSERT INTO ${MANAGER_PHASES_TABLE} (project_id, phase_name, start_date) VALUES (?, ?, CURDATE())`, [projectId, newGate], req);
       }
     }
@@ -655,52 +673,91 @@ app.put('/api/manager-yearly/:projectId', authenticateToken, requireEditAccess, 
   }
 });
 
+app.delete('/api/manager-yearly/:projectId', authenticateToken, requireAdmin, async (req, res) => {
+  const trace = traceStart('DELETE /api/manager-yearly/:projectId', req, { projectId: req.params.projectId });
+  
+  try {
+    const projectId = req.params.projectId;
+
+    await queryPromise(`DELETE FROM ${MANAGER_YEARLY_TABLE} WHERE project_id = ?`, [projectId], req);
+    await queryPromise(`DELETE FROM ${MANAGER_METRICS_TABLE} WHERE project_id = ?`, [projectId], req);
+    await queryPromise(`DELETE FROM ${MANAGER_COMMENTS_TABLE} WHERE project_id = ?`, [projectId], req);
+    await queryPromise(`DELETE FROM ${MANAGER_HISTORY_TABLE} WHERE project_id = ?`, [projectId], req);
+    await queryPromise(`DELETE FROM ${MANAGER_PHASES_TABLE} WHERE project_id = ?`, [projectId], req);
+    
+    const result = await queryPromise(`DELETE FROM ${MANAGER_PROJECTS_TABLE} WHERE project_id = ?`, [projectId], req);
+
+    if (result.affectedRows === 0) {
+      traceEnd(trace, { outcome: 'not_found' });
+      return res.status(404).json({ message: 'Project not found.' });
+    }
+
+    traceEnd(trace, { outcome: 'success', projectId });
+    return res.json({ message: 'Project deleted successfully.' });
+  } catch (err) {
+    traceError(trace, err);
+    return res.status(500).json({ message: err.message });
+  }
+});
 
 // =====================================
-// AUTOMATED MONTHLY SNAPSHOTS
+// AUTOMATED MONTHLY SNAPSHOTS (UPSERT)
 // =====================================
-// Runs every night at 11:55 PM (23:55)
 cron.schedule('55 23 * * *', async () => {
   const today = new Date();
   const tomorrow = new Date(today);
   tomorrow.setDate(today.getDate() + 1);
 
   if (today.getMonth() !== tomorrow.getMonth()) {
-    console.log('Last day of the month detected. Running aggregated KPI snapshot...');
+    console.log('Last day of the month detected. Running project-level snapshot...');
     
     try {
+      const monthStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+      
       const snapshotSql = `
         INSERT INTO t_manager_monthly_snapshots 
-          (snapshot_month, current_pmo_gate, total_projects, 
-           total_capacity_gain_value, total_capacity_gain_pct, 
-           total_dl_value, total_dl_equivalent, 
-           total_idl_value, total_idl_fte, 
-           total_yield_value, total_yield_gain_pct, 
-           total_quality_value, total_quality_cases)
+          (snapshot_month, project_id, project_name, project_status, current_pmo_gate, 
+           capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent, 
+           idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases)
         SELECT 
-          DATE_FORMAT(CURRENT_DATE, '%Y-%m'), 
-          IFNULL(p.current_pmo_gate, 'Unassigned'),
-          COUNT(p.project_id),
-          SUM(m.capacity_gain_value), SUM(m.capacity_gain_pct),
-          SUM(m.dl_value), SUM(m.dl_equivalent),
-          SUM(m.idl_value), SUM(m.idl_fte),
-          SUM(m.yield_value), SUM(m.yield_gain_pct),
-          SUM(m.quality_value), SUM(m.quality_cases)
-        FROM t_manager_project_master p
+          ?, 
+          p.project_id, 
+          p.project_name,
+          p.project_status,
+          p.current_pmo_gate,
+          m.capacity_gain_value, m.capacity_gain_pct,
+          m.dl_value, m.dl_equivalent,
+          m.idl_value, m.idl_fte,
+          m.yield_value, m.yield_gain_pct,
+          m.quality_value, m.quality_cases
+        FROM ${MANAGER_PROJECTS_TABLE} p
         LEFT JOIN (
-          SELECT m1.* FROM t_manager_metrics m1
+          SELECT m1.* FROM ${MANAGER_METRICS_TABLE} m1
           INNER JOIN (
               SELECT project_id, MAX(reporting_year) as max_year 
-              FROM t_manager_metrics 
+              FROM ${MANAGER_METRICS_TABLE} 
               GROUP BY project_id
           ) latest ON m1.project_id = latest.project_id AND m1.reporting_year = latest.max_year
         ) m ON p.project_id = m.project_id
-        GROUP BY p.current_pmo_gate;
+        ON DUPLICATE KEY UPDATE
+          project_name = VALUES(project_name),
+          project_status = VALUES(project_status),
+          current_pmo_gate = VALUES(current_pmo_gate),
+          capacity_gain_value = VALUES(capacity_gain_value),
+          capacity_gain_pct = VALUES(capacity_gain_pct),
+          dl_value = VALUES(dl_value),
+          dl_equivalent = VALUES(dl_equivalent),
+          idl_value = VALUES(idl_value),
+          idl_fte = VALUES(idl_fte),
+          yield_value = VALUES(yield_value),
+          yield_gain_pct = VALUES(yield_gain_pct),
+          quality_value = VALUES(quality_value),
+          quality_cases = VALUES(quality_cases);
       `;
 
       const dummyReq = { headers: {} };
-      await queryPromise(snapshotSql, [], dummyReq);
-      console.log('Aggregated monthly snapshot captured successfully.');
+      await queryPromise(snapshotSql, [monthStr], dummyReq);
+      console.log(`Project-level snapshot captured successfully for ${monthStr}.`);
     } catch (err) {
       console.error('Failed to capture monthly snapshot:', err);
     }
@@ -709,26 +766,32 @@ cron.schedule('55 23 * * *', async () => {
 
 // =====================================
 // MANUAL SNAPSHOT TRIGGER (ADMIN ONLY)
+// Changed to POST to accept specific months
 // =====================================
-app.get('/api/admin/force-snapshot', authenticateToken, requireAdmin, async (req, res) => {
+app.post('/api/admin/force-snapshot', authenticateToken, requireAdmin, async (req, res) => {
   try {
+    const today = new Date();
+    const fallbackMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+    
+    // Accepts snapshotMonth from request body, defaults to current month if missing
+    const targetMonth = normalizeText(req.body.snapshotMonth) || fallbackMonth;
+
     const snapshotSql = `
       INSERT INTO t_manager_monthly_snapshots 
-        (snapshot_month, current_pmo_gate, total_projects, 
-         total_capacity_gain_value, total_capacity_gain_pct, 
-         total_dl_value, total_dl_equivalent, 
-         total_idl_value, total_idl_fte, 
-         total_yield_value, total_yield_gain_pct, 
-         total_quality_value, total_quality_cases)
+        (snapshot_month, project_id, project_name, project_status, current_pmo_gate, 
+         capacity_gain_value, capacity_gain_pct, dl_value, dl_equivalent, 
+         idl_value, idl_fte, yield_value, yield_gain_pct, quality_value, quality_cases)
       SELECT 
-        DATE_FORMAT(CURRENT_DATE, '%Y-%m'), 
-        IFNULL(p.current_pmo_gate, 'Unassigned'),
-        COUNT(p.project_id),
-        SUM(m.capacity_gain_value), SUM(m.capacity_gain_pct),
-        SUM(m.dl_value), SUM(m.dl_equivalent),
-        SUM(m.idl_value), SUM(m.idl_fte),
-        SUM(m.yield_value), SUM(m.yield_gain_pct),
-        SUM(m.quality_value), SUM(m.quality_cases)
+        ?, 
+        p.project_id, 
+        p.project_name,
+        p.project_status,
+        p.current_pmo_gate,
+        m.capacity_gain_value, m.capacity_gain_pct,
+        m.dl_value, m.dl_equivalent,
+        m.idl_value, m.idl_fte,
+        m.yield_value, m.yield_gain_pct,
+        m.quality_value, m.quality_cases
       FROM ${MANAGER_PROJECTS_TABLE} p
       LEFT JOIN (
         SELECT m1.* FROM ${MANAGER_METRICS_TABLE} m1
@@ -738,11 +801,25 @@ app.get('/api/admin/force-snapshot', authenticateToken, requireAdmin, async (req
             GROUP BY project_id
         ) latest ON m1.project_id = latest.project_id AND m1.reporting_year = latest.max_year
       ) m ON p.project_id = m.project_id
-      GROUP BY p.current_pmo_gate;
+      ON DUPLICATE KEY UPDATE
+        project_name = VALUES(project_name),
+        project_status = VALUES(project_status),
+        current_pmo_gate = VALUES(current_pmo_gate),
+        capacity_gain_value = VALUES(capacity_gain_value),
+        capacity_gain_pct = VALUES(capacity_gain_pct),
+        dl_value = VALUES(dl_value),
+        dl_equivalent = VALUES(dl_equivalent),
+        idl_value = VALUES(idl_value),
+        idl_fte = VALUES(idl_fte),
+        yield_value = VALUES(yield_value),
+        yield_gain_pct = VALUES(yield_gain_pct),
+        quality_value = VALUES(quality_value),
+        quality_cases = VALUES(quality_cases);
     `;
-
-    await queryPromise(snapshotSql, [], req);
-    res.json({ message: 'Manual snapshot forced successfully.' });
+    console.log("EXECUTING SNAPSHOT FOR:", targetMonth);
+    console.log(snapshotSql);
+    await queryPromise(snapshotSql, [targetMonth], req);
+    res.json({ message: `Snapshot for ${targetMonth} synchronized successfully.` });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
